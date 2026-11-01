@@ -30,6 +30,14 @@ class ParsedDocument:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
+def _sanitize_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.replace("\x00", "").replace("\r", " ")
+
+
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|?\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _PDF_TERMINAL_PUNCTUATION = (".", ",", ";", ":", "!")
@@ -329,4 +337,14 @@ def parse_file(path: Path, extension: str | None = None) -> ParsedDocument:
     except Exception as exc:
         raise DocumentParseError(f"Failed to parse {suffix} document: {exc}") from exc
 
-    return ParsedDocument(blocks=[block for block in blocks if block.text.strip()])
+    sanitized_blocks = [
+        ParsedBlock(
+            text=_sanitize_text(block.text),
+            page_number=block.page_number,
+            section=_sanitize_text(block.section),
+            kind=block.kind,
+        )
+        for block in blocks
+        if _sanitize_text(block.text).strip()
+    ]
+    return ParsedDocument(blocks=sanitized_blocks)
