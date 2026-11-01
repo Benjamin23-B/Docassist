@@ -15,6 +15,7 @@ import type {
   Citation,
   DocumentItem,
   Message,
+  RetrievalInfo,
   User,
 } from "./types";
 
@@ -22,6 +23,8 @@ type LocalMessage = Message & {
   streaming?: boolean;
   error?: string;
   model?: string;
+  retrieval?: RetrievalInfo;
+  rewrittenQuery?: string;
 };
 
 type FeedbackHandler = (
@@ -538,6 +541,10 @@ function Workspace({
                     session_id: meta.session_id,
                     citations: meta.citations,
                     model: meta.model,
+                    retrieval: meta.retrieval,
+                    rewrittenQuery: meta.retrieval?.rewritten
+                      ? meta.query
+                      : undefined,
                   }
                 : message,
             ),
@@ -929,6 +936,30 @@ function MessageBubble({
           {message.model && (
             <span className="model-badge">{message.model}</span>
           )}
+          {message.retrieval?.hybrid && (
+            <span
+              className="model-badge alt"
+              title="Dense vector and keyword retrieval"
+            >
+              hybrid
+            </span>
+          )}
+          {message.retrieval?.reranked && (
+            <span
+              className="model-badge alt"
+              title="Candidates re-scored before answering"
+            >
+              reranked
+            </span>
+          )}
+          {message.rewrittenQuery && (
+            <span
+              className="model-badge alt"
+              title={`Follow-up rewritten for retrieval: ${message.rewrittenQuery}`}
+            >
+              rewritten
+            </span>
+          )}
         </div>
 
         <div className="message-content">
@@ -1104,7 +1135,7 @@ function CitationModal({
         </p>
         <blockquote>{citation.snippet}</blockquote>
         <p className="citation-score">
-          Similarity {Math.max(0, Math.round(citation.score * 100))}% · chunk #
+          Relevance {Math.max(0, Math.round(citation.score * 100))}% · chunk #
           {citation.chunk_index}
         </p>
       </div>

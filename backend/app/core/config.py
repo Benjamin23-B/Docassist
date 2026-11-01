@@ -77,6 +77,27 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 6
     chat_history_limit: int = 8
 
+    # --- Advanced retrieval (Phase 5) ---------------------------------------
+    query_rewrite_enabled: bool = True
+    query_rewrite_provider: Literal["deterministic", "openai"] = "deterministic"
+    # Defaults to LLM_MODEL when unset.
+    query_rewrite_model: str | None = None
+    query_rewrite_history_limit: int = 4
+
+    hybrid_search_enabled: bool = True
+    # Each retriever fetches TOP_K * multiplier candidates before fusion.
+    hybrid_candidate_multiplier: int = 4
+    hybrid_rrf_k: int = 60
+    hybrid_vector_weight: float = 1.0
+    hybrid_keyword_weight: float = 1.0
+
+    reranker_provider: Literal["none", "deterministic", "cohere"] = "deterministic"
+    # Retrieve this many candidates, then keep RETRIEVAL_TOP_K after reranking.
+    rerank_candidate_k: int = 20
+    cohere_api_key: str | None = None
+    cohere_rerank_model: str = "rerank-english-v3.0"
+    cohere_base_url: str = "https://api.cohere.com/v1"
+
     llm_provider: Literal["deterministic", "openai"] = "deterministic"
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.1
@@ -103,6 +124,8 @@ class Settings(BaseSettings):
         "openai_base_url",
         "celery_broker_url",
         "celery_result_backend",
+        "query_rewrite_model",
+        "cohere_api_key",
         mode="before",
     )
     @classmethod
@@ -129,6 +152,18 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_TOP_K must be positive")
         if self.chat_history_limit < 0:
             raise ValueError("CHAT_HISTORY_LIMIT must not be negative")
+        if self.query_rewrite_history_limit < 0:
+            raise ValueError("QUERY_REWRITE_HISTORY_LIMIT must not be negative")
+        if self.hybrid_candidate_multiplier < 1:
+            raise ValueError("HYBRID_CANDIDATE_MULTIPLIER must be at least 1")
+        if self.hybrid_rrf_k <= 0:
+            raise ValueError("HYBRID_RRF_K must be positive")
+        if self.hybrid_vector_weight < 0 or self.hybrid_keyword_weight < 0:
+            raise ValueError("Hybrid retrieval weights must not be negative")
+        if self.hybrid_vector_weight == 0 and self.hybrid_keyword_weight == 0:
+            raise ValueError("At least one hybrid retrieval weight must be positive")
+        if self.rerank_candidate_k < self.retrieval_top_k:
+            raise ValueError("RERANK_CANDIDATE_K must not be smaller than RETRIEVAL_TOP_K")
         if self.llm_max_tokens <= 0:
             raise ValueError("LLM_MAX_TOKENS must be positive")
         if not 0.0 <= self.llm_temperature <= 2.0:
@@ -148,6 +183,11 @@ class Settings(BaseSettings):
                 "OPENAI_API_KEY is required when EMBEDDING_PROVIDER or "
                 "LLM_PROVIDER is set to openai"
             )
+        if self.query_rewrite_enabled and self.query_rewrite_provider == "openai":
+            if not self.openai_api_key:
+                raise RuntimeError("OPENAI_API_KEY is required when QUERY_REWRITE_PROVIDER=openai")
+        if self.reranker_provider == "cohere" and not self.cohere_api_key:
+            raise RuntimeError("COHERE_API_KEY is required when RERANKER_PROVIDER=cohere")
         if self.environment.lower() != "production":
             return
         if self.jwt_secret in INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32:

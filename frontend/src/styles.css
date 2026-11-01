@@ -579,6 +579,12 @@ ul {
   border: 1px solid rgba(53, 208, 186, 0.25);
 }
 
+.model-badge.alt {
+  color: var(--accent);
+  background: rgba(109, 140, 255, 0.1);
+  border-color: rgba(109, 140, 255, 0.3);
+}
+
 .message-content {
   width: 100%;
   max-width: 760px;

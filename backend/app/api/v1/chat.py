@@ -24,7 +24,9 @@ from app.rag.llm import (
     SourcePassage,
     get_llm_provider,
 )
+from app.rag.reranker import rerank_chunks
 from app.rag.retriever import RetrievedChunk, retrieve_chunks
+from app.rag.rewriter import rewrite_query
 from app.schemas.chat import (
     AskRequest,
     ChatMessageRead,
@@ -225,12 +227,26 @@ def ask_question(
             detail="Question must not be empty",
         )
 
+    history = _load_history(db, session_id_value)
+    search_query = rewrite_query(question, history)
+    if search_query != " ".join(question.split()):
+        logger.info(
+            "Rewrote follow-up for session %s: %r -> %r",
+            session_id_value,
+            question,
+            search_query,
+        )
+
+    reranking = settings.reranker_provider != "none"
+    candidate_k = settings.rerank_candidate_k if reranking else settings.retrieval_top_k
+
     try:
         chunks = retrieve_chunks(
             db,
             user_id=current_user.id,
-            query=question,
+            query=search_query,
             doc_scope=session.doc_scope,
+            top_k=candidate_k,
         )
     except EmbeddingProviderError as exc:
         raise HTTPException(
@@ -243,6 +259,12 @@ def ask_question(
             detail="The embedding provider is unavailable. Please retry.",
         ) from exc
 
+    chunks = rerank_chunks(
+        chunks,
+        query=search_query,
+        top_k=settings.retrieval_top_k,
+    )
+
     try:
         llm = get_llm_provider()
     except LLMProviderError as exc:
@@ -252,7 +274,6 @@ def ask_question(
         ) from exc
 
     passages, citations = _build_context(chunks)
-    history = _load_history(db, session_id_value)
 
     db.add(
         Message(
@@ -279,6 +300,13 @@ def ask_question(
                 "message_id": str(assistant_message_id),
                 "model": llm.model_name,
                 "citations": citation_payload,
+                "query": search_query,
+                "retrieval": {
+                    "rewritten": search_query != " ".join(question.split()),
+                    "hybrid": settings.hybrid_search_enabled,
+                    "reranked": reranking,
+                    "matches": len(chunks),
+                },
             },
         )
 

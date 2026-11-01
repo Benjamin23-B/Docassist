@@ -22,7 +22,7 @@ An end-to-end, enterprise-ready Retrieval-Augmented Generation (RAG) and Agentic
 
 ## 🔍 Overview
 
-This platform provides asynchronous document ingestion, grounded vector retrieval, streaming answers with source citations, and a scope-controlled chat interface. The roadmap extends this into hybrid search, neural reranking, and tool-calling autonomous agents.
+This platform provides asynchronous document ingestion, grounded hybrid retrieval, contextual query rewriting, reranked streaming answers with source citations, and a scope-controlled chat interface. The roadmap continues with tool-calling autonomous agents and an evaluation suite.
 
 ---
 
@@ -62,9 +62,9 @@ This platform provides asynchronous document ingestion, grounded vector retrieva
 - **Granular Metadata**: Every chunk tracks `doc_id`, `page_number`, `section_title`, `chunk_index`, and `embedding_model`.
 
 ### 2. Retrieval & Agentic Q&A
-- **Query Rewriting** *(Phase 5)*: Contextual resolution of ambiguous follow-up questions using session history.
-- **Hybrid Retrieval** *(Phase 5)*: Combines dense vector similarity (`pgvector` with HNSW cosine index) and sparse keyword search (`tsvector` / BM25).
-- **Reranking** *(Phase 5)*: Neural cross-encoders (e.g., Cohere Rerank or BGE Reranker) distill candidates to the top 4–6 high-precision passages.
+- **Query Rewriting**: Contextual resolution of ambiguous follow-up questions using session history.
+- **Hybrid Retrieval**: Combines dense vector similarity (`pgvector` with HNSW cosine index) and sparse keyword search (`tsvector` with `ts_rank_cd` cover-density ranking), fused with reciprocal rank fusion.
+- **Reranking**: Re-scores retrieval candidates before generation with an offline lexical reranker or a hosted Cohere cross-encoder.
 - **Grounded Generation**: System prompt enforcement restricting responses exclusively to verified context.
 - **Clickable Citations**: UI citation chips mapped directly to document and page numbers.
 - **Real-time Streaming**: Server-Sent Events (SSE) for low-latency streaming responses.
@@ -114,6 +114,20 @@ question ──► embed ──► pgvector top-k ──► grounded prompt ─�
 - **Scoped retrieval**: a session can be created against a validated subset of the user's documents; reopening it restores that scope.
 - **Answer feedback**: `POST /api/v1/messages/{id}/feedback` records one verdict per assistant message (`rating` = `1` helpful / `-1` not helpful) with an optional 2,000-character comment. Resubmitting replaces the existing verdict.
 - **Markdown export**: `GET /api/v1/chat/sessions/{id}/export` downloads a transcript with citations and feedback as a `.md` attachment.
+
+---
+
+## 🔎 Advanced Retrieval (Phase 5)
+
+```text
+question ──► rewrite (history) ──► dense top-N ─┐
+                                   keyword top-N ┴─► RRF fusion ──► rerank ──► top-k ──► prompt
+```
+
+- **Query rewriting**: follow-ups that rely on pronouns or omitted subjects are expanded using recent user turns. The deterministic rewriter works offline by prepending the previous question; `QUERY_REWRITE_PROVIDER=openai` uses a chat model for cleaner standalone queries.
+- **Hybrid retrieval**: dense cosine search over `pgvector` and PostgreSQL full-text search (`websearch_to_tsquery` + `ts_rank_cd`) each return candidates. Weighted reciprocal rank fusion (`HYBRID_RRF_K`, `HYBRID_VECTOR_WEIGHT`, `HYBRID_KEYWORD_WEIGHT`) merges them without needing comparable score scales, and the same tenant/status/scope filters apply to both.
+- **Reranking**: `RERANK_CANDIDATE_K` candidates are re-scored to `RETRIEVAL_TOP_K` passages. `RERANKER_PROVIDER=deterministic` combines query-term coverage, filename/section overlap, phrase matches and prior retrieval score; `cohere` calls a hosted cross-encoder. Provider failures fall back to the fused order.
+- **Observability**: the SSE `meta` event now includes the rewritten `query` and a `retrieval` object (`rewritten`, `hybrid`, `reranked`, `matches`).
 
 ---
 
@@ -230,7 +244,7 @@ SSE events emitted by the ask endpoint:
 
 | Event | Data |
 |---|---|
-| `meta` | `session_id`, `message_id`, `model`, `citations[]` |
+| `meta` | `session_id`, `message_id`, `model`, `citations[]`, `query`, `retrieval` |
 | `token` | `text` |
 | `done` | `message_id`, `latency_ms`, `tokens_used` |
 | `error` | `detail`, `message_id` |
@@ -280,8 +294,10 @@ rag/
 │       │   ├── storage.py      # S3/MinIO client & presigned URLs
 │       │   ├── upload.py       # Validation, hashing, streaming
 │       │   └── export.py       # Markdown transcript rendering
-│       ├── rag/                # Retrieval & generation (Phase 3)
-│       │   ├── retriever.py    # pgvector cosine search, doc scoping
+│       ├── rag/                # Retrieval & generation (Phase 3–5)
+│       │   ├── retriever.py    # Dense + keyword search, reciprocal rank fusion
+│       │   ├── rewriter.py     # Contextual follow-up rewriting
+│       │   ├── reranker.py     # Deterministic and Cohere candidate reranking
 │       │   └── llm.py          # Grounded prompt + deterministic/OpenAI LLMs
 │       ├── workers/            # Ingestion pipeline (Celery)
 │       │   ├── celery_app.py   # Broker/queue configuration
@@ -320,7 +336,7 @@ rag/
 | **Phase 2** | ✅ Ingestion Engine | Celery pipeline: parsing, recursive chunking, batch embeddings, pgvector indexing |
 | **Phase 3** | ✅ Core RAG & Streaming | Vector search, basic prompt template, SSE streaming endpoint, and React chat interface |
 | **Phase 4** | ✅ Document & History Scope | Document management, scoped conversation sessions with rename/export/delete, and answer feedback |
-| **Phase 5** | Advanced Search | Hybrid search (vector + keyword), query rewriting, cross-encoder reranking |
+| **Phase 5** | ✅ Advanced Search | Query rewriting from history, hybrid vector + keyword retrieval with RRF, and candidate reranking |
 | **Phase 6** | Agent Loop & Production | Autonomous tool invocation (`search`, `summarize`), automated evaluation suite, rate limits |
 
 ---
@@ -421,6 +437,19 @@ OPENAI_API_KEY=sk-...
 
 The same `OPENAI_API_KEY` covers embeddings and chat when both providers are
 `openai`; `EMBEDDING_PROVIDER` and `LLM_PROVIDER` are configured independently.
+
+Advanced retrieval works offline by default. To use a hosted reranker instead of
+the deterministic one:
+
+```bash
+RERANKER_PROVIDER=cohere
+COHERE_API_KEY=...
+# optional: COHERE_RERANK_MODEL=rerank-english-v3.0
+```
+
+Set `HYBRID_SEARCH_ENABLED=false`, `RERANKER_PROVIDER=none`, or
+`QUERY_REWRITE_ENABLED=false` to isolate individual retrieval stages while
+debugging.
 
 ### 3. Create a user and upload a document
 
@@ -541,9 +570,8 @@ ruff check .
 
 ### Phase 3 notes
 
-- Retrieval is vector-only in this phase. Hybrid keyword search, query rewriting
-  and cross-encoder reranking arrive in Phase 5; the `tsvector` index is already
-  in place.
+- Retrieval was vector-only in Phase 3. Phase 5 layers keyword fusion, query
+  rewriting and reranking on the existing `tsvector` and HNSW indexes.
 - `LLM_PROVIDER=deterministic` makes the full chat flow work offline by quoting
   the best-matching retrieved sentences with citations. It is an extractive
   development provider, not a general-purpose model.
@@ -577,5 +605,25 @@ ruff check .
 - The sidebar now exposes document reindex/delete and session
   rename/export/delete; assistant messages have helpful/not-helpful controls
   with an optional comment.
+
+### Phase 5 notes
+
+- Query rewriting only triggers for likely follow-ups (pronouns, short
+  elliptical questions, "what about…"), so standalone questions are embedded
+  unchanged. The original question is still what gets stored and shown to the
+  user; only retrieval uses the rewritten query.
+- Keyword search uses `websearch_to_tsquery('english', ...)` and `ts_rank_cd`,
+  so operators such as `OR` and quoted phrases work and user input cannot break
+  the query.
+- Fusion uses weighted reciprocal rank fusion and normalises the best score to
+  `1.0`; citation scores therefore represent relative relevance across both
+  retrievers rather than raw cosine similarity.
+- The deterministic reranker never calls a network. Set
+  `RERANKER_PROVIDER=cohere` (with `COHERE_API_KEY`) for a hosted cross-encoder;
+  any reranker error is logged and the fused order is used instead.
+- `RERANK_CANDIDATE_K` must be at least `RETRIEVAL_TOP_K`. Each hybrid source
+  fetches `candidate limit × HYBRID_CANDIDATE_MULTIPLIER` rows before fusion.
+- The React UI marks answers with `hybrid`, `reranked` and `rewritten` badges
+  from the SSE `meta` event; hover the `rewritten` badge to see the search query.
 
 

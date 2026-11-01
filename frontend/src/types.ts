@@ -79,11 +79,20 @@ export interface SessionList {
   page_size: number;
 }
 
+export interface RetrievalInfo {
+  rewritten: boolean;
+  hybrid: boolean;
+  reranked: boolean;
+  matches: number;
+}
+
 export interface MetaEvent {
   session_id: string;
   message_id: string;
   model: string;
   citations: Citation[];
+  query?: string;
+  retrieval?: RetrievalInfo;
 }
 
 export interface DoneEvent {
