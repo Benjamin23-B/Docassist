@@ -1,6 +1,7 @@
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_JWT_SECRET = "dev-only-secret-please-change-me-0123456789abcdef"
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+    redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
@@ -54,6 +56,23 @@ class Settings(BaseSettings):
 
     embedding_dimension: int = 1536
 
+    # --- Ingestion / embeddings ---------------------------------------------
+    embedding_provider: Literal["deterministic", "openai"] = "deterministic"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_batch_size: int = 64
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+
+    chunk_size_tokens: int = 700
+    chunk_overlap_tokens: int = 90
+    min_chunk_tokens: int = 120
+
+    ingestion_max_retries: int = 3
+    celery_broker_url: str | None = None
+    celery_result_backend: str | None = None
+    celery_task_always_eager: bool = False
+    dlq_key: str = "rag:ingestion:dlq"
+
     @field_validator("allowed_extensions")
     @classmethod
     def _normalise_extensions(cls, value: list[str]) -> list[str]:
@@ -67,12 +86,45 @@ class Settings(BaseSettings):
             normalised.append(extension)
         return normalised
 
+    @field_validator(
+        "s3_endpoint_url",
+        "s3_public_endpoint_url",
+        "openai_api_key",
+        "openai_base_url",
+        "celery_broker_url",
+        "celery_result_backend",
+        mode="before",
+    )
+    @classmethod
+    def _blank_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _validate_ingestion_settings(self) -> "Settings":
+        if self.embedding_dimension <= 0:
+            raise ValueError("EMBEDDING_DIMENSION must be positive")
+        if self.chunk_size_tokens <= 0:
+            raise ValueError("CHUNK_SIZE_TOKENS must be positive")
+        if self.chunk_overlap_tokens < 0:
+            raise ValueError("CHUNK_OVERLAP_TOKENS must not be negative")
+        if self.chunk_overlap_tokens >= self.chunk_size_tokens:
+            raise ValueError("CHUNK_OVERLAP_TOKENS must be smaller than CHUNK_SIZE_TOKENS")
+        if self.min_chunk_tokens > self.chunk_size_tokens:
+            raise ValueError("MIN_CHUNK_TOKENS must not exceed CHUNK_SIZE_TOKENS")
+        if self.embedding_batch_size <= 0:
+            raise ValueError("EMBEDDING_BATCH_SIZE must be positive")
+        return self
+
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
 
     def validate_runtime(self) -> None:
-        """Fail fast on unsafe configuration in production."""
+        """Fail fast on unsafe or incomplete configuration."""
+        if self.embedding_provider == "openai" and not self.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai")
         if self.environment.lower() != "production":
             return
         if self.jwt_secret in INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32:

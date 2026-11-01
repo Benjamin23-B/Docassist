@@ -61,8 +61,7 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 - **Smart Chunking**: Structure-aware splitting (500–800 tokens, 10–15% overlap) preserving markdown tables, headings, and paragraph boundaries.
 - **Granular Metadata**: Every chunk tracks `doc_id`, `page_number`, `section_title`, `chunk_index`, and `embedding_model`.
 
-### 2. Retrieval & Agentic Q&A
-- **Query Rewriting**: Contextual resolution of ambiguous follow-up questions using session history.
+### 2. Retrieval & Agentic Q&A- **Query Rewriting**: Contextual resolution of ambiguous follow-up questions using session history.
 - **Hybrid Retrieval**: Combines dense vector similarity (`pgvector` with HNSW cosine index) and sparse keyword search (`tsvector` / BM25).
 - **Reranking**: Neural cross-encoders (e.g., Cohere Rerank or BGE Reranker) distill candidates to the top 4–6 high-precision passages.
 - **Grounded Generation**: System prompt enforcement restricting responses exclusively to verified context.
@@ -76,6 +75,23 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 
 ---
 
+## 🧪 Ingestion Pipeline (Phase 2)
+
+```text
+queued ──► download object ──► parse ──► chunk ──► embed (batched) ──► replace chunks ──► ready
+                                                                                       │
+                                                                                       └──► failed + dead letter
+```
+
+- **Parsers**: Markdown (heading hierarchy, tables, fenced code), HTML, DOCX, plain text, and PDF (per-page text with heading detection by font size). PDFs without a text layer (scans) require OCR, which is out of scope and reported as a failed document.
+- **Chunking**: ~700 tokens per chunk with ~90-token (≈13%) overlap, configurable via `CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS`. Section headings are prepended, sections are never mixed, and tables stay intact (oversized tables split by row with the header repeated).
+- **Embeddings**: `EMBEDDING_PROVIDER=deterministic` (default; offline, hash-based) or `openai` (`text-embedding-3-small` by default, batched). The embedding model name is stored on every chunk for model-version isolation.
+- **Indexing**: Chunks are replaced atomically per document (delete + bulk insert), so reindexing is idempotent. The `pgvector` HNSW and `tsvector` indexes are maintained automatically.
+- **Reliability**: Transient failures (storage, network, rate limits) retry with exponential backoff (`30s → 60s → 120s`, max 3). Permanent failures (unsupported/corrupt files, no text, bad credentials) fail immediately. Final failures set `documents.status='failed'`, surface `error_message`, and append a JSON record to the Redis dead-letter list (`rag:ingestion:dlq`).
+- **Reindex**: `POST /api/v1/documents/{id}/reindex` re-runs the pipeline for an existing object (retry after failures or re-embed after a model upgrade).
+
+---
+
 ## 🛠️ Tech Stack
 
 | Component | Technology | Alternative / Scale-up |
@@ -84,8 +100,8 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 | **Worker Queue** | Celery, Redis | Temporal, AWS SQS |
 | **Relational & Vector DB** | PostgreSQL 16+ with `pgvector` | Qdrant, Milvus, Pinecone |
 | **Object Storage** | MinIO (local dev) / AWS S3 | Cloudflare R2, GCS |
-| **Document Parsers** | PyMuPDF, `pdfplumber`, `unstructured` | Docling, Azure Doc Intelligence |
-| **LLM & Embeddings** | OpenAI / Google Gemini / Anthropic | Self-hosted (vLLM, Ollama, TEI) |
+| **Document Parsers** | PyMuPDF, `python-docx`, BeautifulSoup | Docling, Azure Doc Intelligence |
+| **LLM & Embeddings** | OpenAI / deterministic (dev) | Google Gemini, Anthropic, self-hosted (vLLM, Ollama, TEI) |
 | **Reranker** | BGE-Reranker-Large, Cohere Rerank | Cross-Encoder HuggingFace |
 | **Frontend** | React (Next.js / Vite), Tailwind CSS | React + Shadcn/ui |
 
@@ -171,9 +187,9 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 - `POST /api/v1/documents` - Upload document file (multipart/form-data)
 - `GET /api/v1/documents` - List uploaded documents (pagination, status filters)
 - `GET /api/v1/documents/{id}` - Get processing status and details (incl. chunk count)
+- `POST /api/v1/documents/{id}/reindex` - Re-run ingestion (re-parse, re-chunk, re-embed)
 - `GET /api/v1/documents/{id}/download` - Redirect to a short-lived presigned URL
 - `DELETE /api/v1/documents/{id}` - Delete document, associated chunks, and stored file
-- `POST /api/v1/documents/{id}/reindex` - Trigger re-chunking and re-embedding *(Phase 4)*
 
 ### Chat & Q&A *(Phase 3+)*
 - `POST /api/v1/chat/sessions` - Create chat session (with optional document scoping)
@@ -186,12 +202,13 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 - `GET /` - Service metadata
 - `GET /healthz` - Liveness + database connectivity check
 
-### Upload behaviour (Phase 1)
+### Upload behaviour (Phase 1–2)
 - Supported types: `.pdf`, `.md`, `.markdown`, `.txt`, `.docx`, `.html`, `.htm` (configurable)
 - Maximum size: 50 MB by default (`MAX_UPLOAD_SIZE_MB`), enforced while streaming
 - Files are hashed (SHA-256) during upload; re-uploading identical bytes returns `409 Conflict`
   with the existing document ID in the `X-Document-Id` header
 - Objects are stored at `s3://<bucket>/users/<user_id>/documents/<document_id>/<filename>`
+- Ingestion is queued automatically on upload: `queued → processing → ready` (or `failed` with `error_message`)
 
 ---
 
@@ -199,7 +216,7 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 
 ```text
 rag/
-├── docker-compose.yml          # PostgreSQL+pgvector, Redis, MinIO, API
+├── docker-compose.yml          # PostgreSQL+pgvector, Redis, MinIO, API, Celery worker
 ├── Makefile                    # Common dev commands
 ├── .env.example                # Environment template
 ├── README.md                   # System documentation
@@ -225,13 +242,20 @@ rag/
 │       ├── services/
 │       │   ├── storage.py      # S3/MinIO client & presigned URLs
 │       │   └── upload.py       # Validation, hashing, streaming
+│       ├── workers/            # Ingestion pipeline (Celery)
+│       │   ├── celery_app.py   # Broker/queue configuration
+│       │   ├── parser.py       # PDF/Markdown/HTML/DOCX/TXT → blocks
+│       │   ├── chunker.py      # Token-bounded, section-aware chunking
+│       │   ├── embedder.py     # Deterministic + OpenAI providers
+│       │   ├── pipeline.py     # download → parse → chunk → embed → index
+│       │   ├── tasks.py        # Celery task, retries, failure handling
+│       │   └── dlq.py          # Redis dead-letter queue
 │       └── api/                # REST endpoints
 │           ├── deps.py         # Auth dependencies
 │           └── v1/
 │               ├── auth.py
 │               ├── documents.py
 │               └── router.py
-├── workers/                    # Ingestion pipeline (Phase 2)
 └── frontend/                   # React app (Phase 3)
 ```
 
@@ -242,9 +266,9 @@ rag/
 | Phase | Milestone | Deliverables |
 |---|---|---|
 | **Phase 1** | ✅ Foundation & Storage | Database schema, authentication, file storage (S3/MinIO), and upload endpoint |
-| **Phase 2** | Ingestion Engine | Celery pipeline: parsing, recursive chunking, batch embeddings, pgvector indexing |
+| **Phase 2** | ✅ Ingestion Engine | Celery pipeline: parsing, recursive chunking, batch embeddings, pgvector indexing |
 | **Phase 3** | Core RAG & Streaming | Vector search, basic prompt template, SSE streaming endpoint, and React chat interface |
-| **Phase 4** | Document & History Scope | Document management, conversation sessions, reindexing, and document-specific scoping |
+| **Phase 4** | Document & History Scope | Document management, conversation sessions, and document-specific scoping (reindexing shipped in Phase 2) |
 | **Phase 5** | Advanced Search | Hybrid search (vector + keyword), query rewriting, cross-encoder reranking |
 | **Phase 6** | Agent Loop & Production | Autonomous tool invocation (`search`, `summarize`), automated evaluation suite, rate limits |
 
@@ -309,6 +333,7 @@ This starts:
 | MinIO console | http://localhost:9001 | `minioadmin` / `minioadmin` |
 | PostgreSQL | `localhost:5432` | `rag` / `rag` |
 | Redis | `localhost:6379` | — |
+| Worker | — | Celery ingestion worker (`ingestion` queue) |
 
 The API container applies Alembic migrations automatically on start. To run them
 manually:
@@ -316,6 +341,20 @@ manually:
 ```bash
 make migrate   # = docker compose exec api alembic upgrade head
 ```
+
+By default the stack uses offline, deterministic embeddings
+(`EMBEDDING_PROVIDER=deterministic`), so ingestion works without any API key.
+For real semantic embeddings, set the following in `.env` and restart the API
+and worker:
+
+```bash
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+# optional: EMBEDDING_MODEL=text-embedding-3-small (1536 dimensions)
+```
+
+The `chunks.embedding` column is fixed at `EMBEDDING_DIMENSION` (1536), matching
+`text-embedding-3-small`. Changing the dimension requires a migration.
 
 ### 3. Create a user and upload a document
 
@@ -338,6 +377,24 @@ curl -X POST http://localhost:8000/api/v1/documents \
 # List
 curl "http://localhost:8000/api/v1/documents?page=1&page_size=20" \
   -H "Authorization: Bearer <token>"
+
+# Poll ingestion status: queued -> processing -> ready (or failed + error_message)
+curl http://localhost:8000/api/v1/documents/<id> \
+  -H "Authorization: Bearer <token>"
+```
+
+Follow the worker and inspect failed jobs:
+
+```bash
+make logs-worker
+docker compose exec redis redis-cli LRANGE rag:ingestion:dlq 0 -1
+```
+
+Failed documents can be retried without re-uploading:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/<id>/reindex \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### 4. Run without Docker (optional)
@@ -349,26 +406,38 @@ pip install -r requirements-dev.txt
 
 export DATABASE_URL="postgresql+psycopg://rag:rag@localhost:5432/rag"
 export S3_ENDPOINT_URL="http://localhost:9000"
+export REDIS_URL="redis://localhost:6379/0"
 
 alembic upgrade head
 uvicorn app.main:app --reload
+
+# In a second shell: start the ingestion worker
+celery -A app.workers.celery_app worker --loglevel=INFO -Q ingestion
 ```
 
 ### 5. Tests and linting
 
 ```bash
 cd backend
-pytest          # unit tests: auth, upload validation, OpenAPI/DDL checks
+pytest          # unit tests: auth, upload, parsers, chunking, embeddings, task wiring
 ruff check .
 ```
 
-### Phase 1 notes
+### Phase 2 notes
 
 - The full schema (users, documents, chunks, chat sessions, messages, feedback)
-  is created up front, including the `pgvector` HNSW index and generated
-  `tsvector` column, so Phase 2 can index chunks without further migrations.
-- Uploaded documents remain in `queued` status until the Celery ingestion
-  worker from Phase 2 picks them up.
+  was created in Phase 1, including the `pgvector` HNSW index and generated
+  `tsvector` column, so ingestion needed no new migrations.
+- Uploads enqueue `ingestion.ingest_document` after the database commit. If the
+  broker is unavailable the upload still succeeds and the document stays
+  `queued`; use the reindex endpoint once Redis is reachable.
+- Ingestion is idempotent: chunks for a document are deleted and re-inserted in
+  one transaction, and the object-storage file is never modified.
+- Transient failures retry with exponential backoff (30s, 60s, 120s; max 3).
+  After the final attempt the document is marked `failed` and a JSON record is
+  appended to the Redis list `rag:ingestion:dlq` (capped at 1000 entries).
+- Scanned/image-only PDFs have no text layer and fail with
+  `No extractable text found`; OCR is intentionally out of scope.
 - Object storage is created automatically (and by the `minio-init` service),
   so no manual bucket setup is required.
 - `S3_PUBLIC_ENDPOINT_URL` controls the host embedded in presigned download

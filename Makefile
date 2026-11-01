@@ -14,6 +14,9 @@ restart: down up
 logs:
 	docker compose logs -f api
 
+logs-worker:
+	docker compose logs -f worker
+
 ps:
 	docker compose ps
 

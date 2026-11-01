@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from pathlib import Path
 from typing import BinaryIO
 
 import boto3
@@ -88,6 +89,19 @@ class StorageService:
             self._client.delete_object(Bucket=self._bucket, Key=key)
         except (BotoCoreError, ClientError) as exc:
             raise StorageError(f"Failed to delete object {key!r}") from exc
+
+    def key_from_url(self, storage_url: str) -> str | None:
+        """Extract the object key from an ``s3://bucket/key`` URL."""
+        prefix = f"s3://{self._bucket}/"
+        if storage_url.startswith(prefix):
+            return storage_url[len(prefix) :]
+        return None
+
+    def download_to_file(self, key: str, path: Path) -> None:
+        try:
+            self._client.download_file(self._bucket, key, str(path))
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError(f"Failed to download object {key!r}") from exc
 
     def presigned_download_url(
         self,

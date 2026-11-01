@@ -38,11 +38,23 @@ settings = get_settings()
 StorageDep = Annotated[StorageService, Depends(get_storage)]
 
 
-def _object_key(storage_url: str, bucket: str) -> str | None:
-    prefix = f"s3://{bucket}/"
-    if storage_url.startswith(prefix):
-        return storage_url[len(prefix) :]
-    return None
+def _enqueue_ingestion(document_id: uuid.UUID) -> None:
+    """Hand the document to the Celery ingestion worker.
+
+    A broker outage must not fail the upload itself: the document stays
+    ``queued`` and can be retried through the reindex endpoint.
+    """
+    try:
+        from app.workers.tasks import ingest_document_task
+
+        ingest_document_task.delay(str(document_id))
+    except Exception:
+        logger.exception(
+            "Could not enqueue ingestion for document %s; use "
+            "POST /api/v1/documents/%s/reindex to retry",
+            document_id,
+            document_id,
+        )
 
 
 def _get_owned_document(
@@ -91,6 +103,7 @@ def upload_document(
 
     tmp_path: Path | None = None
     uploaded_key: str | None = None
+    document: Document | None = None
     document_id = uuid.uuid4()
 
     try:
@@ -128,7 +141,6 @@ def upload_document(
         db.add(document)
         db.commit()
         db.refresh(document)
-        return document
 
     except HTTPException:
         db.rollback()
@@ -156,6 +168,14 @@ def upload_document(
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
         file.file.close()
+
+    if document is None:  # pragma: no cover - defensive, set on every success path
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Document creation failed",
+        )
+    _enqueue_ingestion(document.id)
+    return document
 
 
 @router.get(
@@ -213,6 +233,34 @@ def get_document(
     return detail
 
 
+@router.post(
+    "/{document_id}/reindex",
+    response_model=DocumentRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-run ingestion (re-parse, re-chunk and re-embed)",
+    responses={409: {"description": "Stored file is missing"}},
+)
+def reindex_document(
+    document_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+    storage: StorageDep,
+) -> Document:
+    document = _get_owned_document(document_id, db, current_user.id)
+    if storage.key_from_url(document.storage_url) is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is not stored in this object storage bucket",
+        )
+
+    document.status = DocumentStatus.QUEUED.value
+    document.error_message = None
+    db.commit()
+    db.refresh(document)
+    _enqueue_ingestion(document.id)
+    return document
+
+
 @router.get(
     "/{document_id}/download",
     summary="Redirect to a short-lived download URL",
@@ -225,7 +273,7 @@ def download_document(
     storage: StorageDep,
 ) -> RedirectResponse:
     document = _get_owned_document(document_id, db, current_user.id)
-    key = _object_key(document.storage_url, storage.bucket)
+    key = storage.key_from_url(document.storage_url)
     if key is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -255,7 +303,7 @@ def delete_document(
     storage: StorageDep,
 ) -> Response:
     document = _get_owned_document(document_id, db, current_user.id)
-    key = _object_key(document.storage_url, storage.bucket)
+    key = storage.key_from_url(document.storage_url)
 
     db.delete(document)
     db.commit()

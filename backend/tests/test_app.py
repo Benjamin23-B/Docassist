@@ -12,6 +12,7 @@ EXPECTED_PATHS = {
     "/api/v1/auth/me",
     "/api/v1/documents",
     "/api/v1/documents/{document_id}",
+    "/api/v1/documents/{document_id}/reindex",
     "/api/v1/documents/{document_id}/download",
 }
 
