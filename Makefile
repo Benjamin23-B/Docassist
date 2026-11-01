@@ -1,4 +1,4 @@
-.PHONY: env up down restart logs ps migrate revision shell test lint format
+.PHONY: env up down restart logs logs-worker logs-frontend ps migrate revision shell test lint format
 
 env:
 	@test -f .env || cp .env.example .env
@@ -16,6 +16,9 @@ logs:
 
 logs-worker:
 	docker compose logs -f worker
+
+logs-frontend:
+	docker compose logs -f frontend
 
 ps:
 	docker compose ps

@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     celery_task_always_eager: bool = False
     dlq_key: str = "rag:ingestion:dlq"
 
+    # --- Retrieval & generation ---------------------------------------------
+    retrieval_top_k: int = 6
+    chat_history_limit: int = 8
+
+    llm_provider: Literal["deterministic", "openai"] = "deterministic"
+    llm_model: str = "gpt-4o-mini"
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 800
+    llm_stream_delay_seconds: float = 0.02
+
     @field_validator("allowed_extensions")
     @classmethod
     def _normalise_extensions(cls, value: list[str]) -> list[str]:
@@ -115,6 +125,16 @@ class Settings(BaseSettings):
             raise ValueError("MIN_CHUNK_TOKENS must not exceed CHUNK_SIZE_TOKENS")
         if self.embedding_batch_size <= 0:
             raise ValueError("EMBEDDING_BATCH_SIZE must be positive")
+        if self.retrieval_top_k <= 0:
+            raise ValueError("RETRIEVAL_TOP_K must be positive")
+        if self.chat_history_limit < 0:
+            raise ValueError("CHAT_HISTORY_LIMIT must not be negative")
+        if self.llm_max_tokens <= 0:
+            raise ValueError("LLM_MAX_TOKENS must be positive")
+        if not 0.0 <= self.llm_temperature <= 2.0:
+            raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+        if self.llm_stream_delay_seconds < 0:
+            raise ValueError("LLM_STREAM_DELAY_SECONDS must not be negative")
         return self
 
     @property
@@ -123,8 +143,11 @@ class Settings(BaseSettings):
 
     def validate_runtime(self) -> None:
         """Fail fast on unsafe or incomplete configuration."""
-        if self.embedding_provider == "openai" and not self.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai")
+        if "openai" in {self.embedding_provider, self.llm_provider} and not self.openai_api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is required when EMBEDDING_PROVIDER or "
+                "LLM_PROVIDER is set to openai"
+            )
         if self.environment.lower() != "production":
             return
         if self.jwt_secret in INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32:

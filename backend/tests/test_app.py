@@ -14,6 +14,9 @@ EXPECTED_PATHS = {
     "/api/v1/documents/{document_id}",
     "/api/v1/documents/{document_id}/reindex",
     "/api/v1/documents/{document_id}/download",
+    "/api/v1/chat/sessions",
+    "/api/v1/chat/sessions/{session_id}",
+    "/api/v1/chat/sessions/{session_id}/ask",
 }
 
 

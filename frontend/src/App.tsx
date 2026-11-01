@@ -1,0 +1,805 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
+
+import { api, askQuestion, getToken, login, register, setToken } from "./api";
+import type {
+  ChatSession,
+  Citation,
+  DocumentItem,
+  Message,
+  User,
+} from "./types";
+
+type LocalMessage = Message & {
+  streaming?: boolean;
+  error?: string;
+  model?: string;
+};
+
+export default function App() {
+  const [token, setTokenState] = useState<string | null>(() => getToken());
+  const [user, setUser] = useState<User | null>(null);
+  const [booting, setBooting] = useState(Boolean(getToken()));
+
+  useEffect(() => {
+    const handleLogout = () => {
+      setTokenState(null);
+      setUser(null);
+    };
+    window.addEventListener("rag:logout", handleLogout);
+    return () => window.removeEventListener("rag:logout", handleLogout);
+  }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      setBooting(false);
+      return;
+    }
+
+    let cancelled = false;
+    setBooting(true);
+    api
+      .me()
+      .then((profile) => {
+        if (!cancelled) {
+          setUser(profile);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setToken(null);
+          setTokenState(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBooting(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  if (!token) {
+    return <AuthScreen onAuthenticated={() => setTokenState(getToken())} />;
+  }
+
+  if (booting) {
+    return (
+      <div className="boot">
+        <span className="spinner" />
+        <span>Loading workspace…</span>
+      </div>
+    );
+  }
+
+  return (
+    <Workspace
+      user={user}
+      onLogout={() => {
+        setToken(null);
+        setTokenState(null);
+      }}
+    />
+  );
+}
+
+function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "register") {
+        await register(email, password);
+      }
+      await login(email, password);
+      onAuthenticated();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="auth-shell">
+      <section className="auth-art">
+        <span className="brand-mark large">RAG</span>
+        <h1>
+          Ask your documents.
+          <br />
+          Trust the answer.
+        </h1>
+        <p>
+          Upload PDFs, Markdown, DOCX and more. Get grounded answers with
+          page-level citations, streamed in real time.
+        </p>
+        <ul>
+          <li>Structure-aware ingestion and pgvector retrieval</li>
+          <li>Answers restricted to your documents</li>
+          <li>Clickable citations with source snippets</li>
+        </ul>
+      </section>
+
+      <form className="auth-card" onSubmit={submit}>
+        <h2>{mode === "login" ? "Welcome back" : "Create an account"}</h2>
+        <p className="muted">
+          {mode === "login"
+            ? "Sign in to your workspace."
+            : "Your documents stay scoped to your account."}
+        </p>
+
+        <label>
+          <span>Email</span>
+          <input
+            type="email"
+            autoComplete="email"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="you@example.com"
+          />
+        </label>
+        <label>
+          <span>Password</span>
+          <input
+            type="password"
+            autoComplete={
+              mode === "login" ? "current-password" : "new-password"
+            }
+            required
+            minLength={8}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="At least 8 characters"
+          />
+        </label>
+
+        {error && <div className="form-error">{error}</div>}
+
+        <button className="primary" type="submit" disabled={busy}>
+          {busy
+            ? "Please wait…"
+            : mode === "login"
+              ? "Sign in"
+              : "Create account"}
+        </button>
+
+        <p className="auth-switch">
+          {mode === "login" ? "New here?" : "Already have an account?"}{" "}
+          <button
+            type="button"
+            className="link"
+            onClick={() => {
+              setMode(mode === "login" ? "register" : "login");
+              setError(null);
+            }}
+          >
+            {mode === "login" ? "Create an account" : "Sign in"}
+          </button>
+        </p>
+      </form>
+    </div>
+  );
+}
+
+function Workspace({
+  user,
+  onLogout,
+}: {
+  user: User | null;
+  onLogout: () => void;
+}) {
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<LocalMessage[]>([]);
+  const [scope, setScope] = useState<string[]>([]);
+  const [question, setQuestion] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshDocuments = useCallback(async () => {
+    try {
+      const list = await api.documents();
+      setDocuments(list.items);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, []);
+
+  const refreshSessions = useCallback(async () => {
+    try {
+      const list = await api.sessions();
+      setSessions(list.items);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDocuments();
+    void refreshSessions();
+  }, [refreshDocuments, refreshSessions]);
+
+  const hasPendingDocuments = documents.some(
+    (document) =>
+      document.status === "queued" || document.status === "processing",
+  );
+
+  useEffect(() => {
+    if (!hasPendingDocuments) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshDocuments();
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [hasPendingDocuments, refreshDocuments]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [messages]);
+
+  function toggleScope(documentId: string) {
+    setScope((previous) =>
+      previous.includes(documentId)
+        ? previous.filter((id) => id !== documentId)
+        : [...previous, documentId],
+    );
+  }
+
+  async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    setUploading(true);
+    setError(null);
+    try {
+      await api.uploadDocument(file);
+      await refreshDocuments();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function startNewChat() {
+    setLoadingSession(true);
+    setError(null);
+    try {
+      const session = await api.createSession(scope);
+      setSessions((previous) => [session, ...previous]);
+      setActiveSessionId(session.id);
+      setMessages([]);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setLoadingSession(false);
+    }
+  }
+
+  async function openSession(sessionId: string) {
+    if (sessionId === activeSessionId || streaming) {
+      return;
+    }
+    setLoadingSession(true);
+    setError(null);
+    try {
+      const detail = await api.session(sessionId);
+      setActiveSessionId(sessionId);
+      setMessages(detail.messages);
+      setScope(detail.doc_scope);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setLoadingSession(false);
+    }
+  }
+
+  async function send() {
+    const text = question.trim();
+    if (!text || streaming) {
+      return;
+    }
+
+    setError(null);
+    setQuestion("");
+    setStreaming(true);
+    setLoadingSession(false);
+
+    let optimisticIds: string[] = [];
+    let assistantKey: string | null = null;
+
+    try {
+      let sessionId = activeSessionId;
+      if (!sessionId) {
+        const session = await api.createSession(scope);
+        sessionId = session.id;
+        setSessions((previous) => [session, ...previous]);
+        setActiveSessionId(session.id);
+      }
+
+      const userMessage: LocalMessage = {
+        id: `local-user-${Date.now()}`,
+        session_id: sessionId,
+        role: "user",
+        content: text,
+        citations: [],
+        tokens_used: null,
+        latency_ms: null,
+        created_at: new Date().toISOString(),
+      };
+      const pendingId = `pending-${Date.now()}`;
+      assistantKey = pendingId;
+      optimisticIds = [userMessage.id, pendingId];
+
+      setMessages((previous) => [
+        ...previous,
+        userMessage,
+        {
+          id: pendingId,
+          session_id: sessionId,
+          role: "assistant",
+          content: "",
+          citations: [],
+          tokens_used: null,
+          latency_ms: null,
+          created_at: new Date().toISOString(),
+          streaming: true,
+        },
+      ]);
+
+      let answer = "";
+      await askQuestion(sessionId, text, {
+        onMeta: (meta) => {
+          assistantKey = meta.message_id;
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === pendingId
+                ? {
+                    ...message,
+                    id: meta.message_id,
+                    session_id: meta.session_id,
+                    citations: meta.citations,
+                    model: meta.model,
+                  }
+                : message,
+            ),
+          );
+        },
+        onToken: (token) => {
+          answer += token;
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantKey
+                ? { ...message, content: answer }
+                : message,
+            ),
+          );
+        },
+        onDone: (done) => {
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantKey
+                ? {
+                    ...message,
+                    streaming: false,
+                    tokens_used: done.tokens_used,
+                    latency_ms: done.latency_ms,
+                  }
+                : message,
+            ),
+          );
+          void refreshSessions();
+        },
+        onError: (detail) => {
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantKey
+                ? {
+                    ...message,
+                    streaming: false,
+                    error: detail,
+                    content:
+                      answer ||
+                      "The assistant could not complete the answer.",
+                  }
+                : message,
+            ),
+          );
+          setError(detail);
+        },
+      });
+    } catch (err) {
+      setMessages((previous) =>
+        previous.filter(
+          (message) =>
+            !optimisticIds.includes(message.id) &&
+            message.id !== assistantKey,
+        ),
+      );
+      setQuestion(text);
+      setError(errorText(err));
+    } finally {
+      setStreaming(false);
+    }
+  }
+
+  function handleComposerKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+    }
+  }
+
+  const scopeLabel = scope.length
+    ? `${scope.length} document${scope.length === 1 ? "" : "s"} in scope`
+    : "All ready documents";
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">RAG</span>
+          <div>
+            <h1>Document Q&amp;A</h1>
+            <p>Grounded answers with citations</p>
+          </div>
+        </div>
+        <div className="topbar-right">
+          <span className="scope-pill">{scopeLabel}</span>
+          {user && <span className="user-email">{user.email}</span>}
+          <button className="ghost" onClick={onLogout}>
+            Sign out
+          </button>
+        </div>
+      </header>
+
+      <div className="workspace">
+        <aside className="sidebar">
+          <section className="sidebar-section">
+            <div className="section-heading">
+              <h2>Documents</h2>
+              <button
+                className="ghost small"
+                onClick={() => fileRef.current?.click()}
+                disabled={uploading}
+              >
+                {uploading ? "Uploading…" : "Upload"}
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                hidden
+                accept=".pdf,.md,.markdown,.txt,.docx,.html,.htm"
+                onChange={handleUpload}
+              />
+            </div>
+            <p className="hint">
+              Tick ready documents to scope a new chat. Leave all unticked to
+              search everything.
+            </p>
+            <ul className="doc-list">
+              {documents.length === 0 && (
+                <li className="empty-list">No documents yet.</li>
+              )}
+              {documents.map((document) => (
+                <li
+                  key={document.id}
+                  className={`doc-item status-${document.status}`}
+                >
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={scope.includes(document.id)}
+                      disabled={document.status !== "ready" || streaming}
+                      onChange={() => toggleScope(document.id)}
+                    />
+                    <span className="doc-name" title={document.filename}>
+                      {document.filename}
+                    </span>
+                    <span
+                      className={`status-dot ${document.status}`}
+                      title={document.status}
+                    />
+                  </label>
+                  <div className="doc-meta">
+                    <span>{document.status}</span>
+                    <span>{formatBytes(document.size_bytes)}</span>
+                  </div>
+                  {document.status === "failed" && document.error_message && (
+                    <p className="doc-error" title={document.error_message}>
+                      {document.error_message}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="sidebar-section grow">
+            <div className="section-heading">
+              <h2>Chats</h2>
+              <button
+                className="ghost small"
+                onClick={() => void startNewChat()}
+                disabled={streaming || loadingSession}
+              >
+                New
+              </button>
+            </div>
+            <ul className="session-list">
+              {sessions.length === 0 && (
+                <li className="empty-list">No conversations yet.</li>
+              )}
+              {sessions.map((session) => (
+                <li key={session.id}>
+                  <button
+                    className={`session-item ${
+                      session.id === activeSessionId ? "active" : ""
+                    }`}
+                    onClick={() => void openSession(session.id)}
+                    disabled={streaming || loadingSession}
+                  >
+                    <span className="session-title">{session.title}</span>
+                    <span className="session-date">
+                      {formatDate(session.created_at)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </aside>
+
+        <main className="main">
+          <div className="messages" ref={scrollRef}>
+            {loadingSession ? (
+              <div className="boot inline">
+                <span className="spinner" />
+                <span>Loading conversation…</span>
+              </div>
+            ) : messages.length === 0 ? (
+              <EmptyState onPick={setQuestion} />
+            ) : (
+              messages.map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  onCitation={setActiveCitation}
+                />
+              ))
+            )}
+          </div>
+
+          <footer className="composer">
+            {error && (
+              <div className="error-banner">
+                <span>{error}</span>
+                <button
+                  className="ghost small"
+                  onClick={() => setError(null)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <div className="composer-row">
+              <textarea
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder={
+                  activeSessionId
+                    ? "Ask a question about the selected documents…"
+                    : "Ask a question to start a new chat…"
+                }
+                rows={2}
+                maxLength={4000}
+                disabled={streaming}
+              />
+              <button
+                className="send"
+                onClick={() => void send()}
+                disabled={streaming || !question.trim()}
+              >
+                {streaming ? "Answering…" : "Send"}
+              </button>
+            </div>
+            <p className="composer-hint">
+              Enter to send · Shift+Enter for a new line · {scopeLabel}
+            </p>
+          </footer>
+        </main>
+      </div>
+
+      {activeCitation && (
+        <CitationModal
+          citation={activeCitation}
+          onClose={() => setActiveCitation(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ onPick }: { onPick: (question: string) => void }) {
+  const suggestions = [
+    "Summarise the key policies in my documents.",
+    "What are the most important deadlines?",
+    "Which document mentions security requirements?",
+  ];
+
+  return (
+    <div className="empty-state">
+      <div className="empty-mark">✦</div>
+      <h2>Ask your documents</h2>
+      <p>
+        Upload a document, wait for it to finish processing, then ask a
+        question. Answers are grounded in retrieved passages and cite their
+        sources.
+      </p>
+      <div className="empty-grid">
+        {suggestions.map((suggestion) => (
+          <button
+            key={suggestion}
+            className="suggestion"
+            onClick={() => onPick(suggestion)}
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  onCitation,
+}: {
+  message: LocalMessage;
+  onCitation: (citation: Citation) => void;
+}) {
+  const isUser = message.role === "user";
+
+  return (
+    <article className={`message-row ${isUser ? "user" : "assistant"}`}>
+      <div className="avatar">{isUser ? "You" : "AI"}</div>
+      <div className="message-body">
+        <div className="message-head">
+          <span>{isUser ? "You" : "Assistant"}</span>
+          {message.model && (
+            <span className="model-badge">{message.model}</span>
+          )}
+        </div>
+
+        <div className="message-content">
+          {message.content}
+          {message.streaming && <span className="stream-cursor" />}
+          {!message.content && message.streaming && !isUser && (
+            <span className="thinking">Retrieving context…</span>
+          )}
+        </div>
+
+        {!isUser && message.citations.length > 0 && (
+          <div className="citations">
+            {message.citations.map((citation) => (
+              <button
+                key={`${citation.chunk_id}-${citation.index}`}
+                className="citation-chip"
+                onClick={() => onCitation(citation)}
+                title={citation.snippet}
+              >
+                <span className="citation-index">[{citation.index}]</span>
+                <span>{citation.filename}</span>
+                {citation.page_number !== null && (
+                  <span className="citation-page">
+                    p. {citation.page_number}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {message.error && (
+          <div className="message-error">{message.error}</div>
+        )}
+
+        {!isUser && !message.streaming && message.latency_ms !== null && (
+          <div className="message-foot">
+            {message.tokens_used ?? 0} tokens · {message.latency_ms} ms
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function CitationModal({
+  citation,
+  onClose,
+}: {
+  citation: Citation;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="citation-modal"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <h3>Source [{citation.index}]</h3>
+          <button className="ghost small" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <p className="citation-file">
+          {citation.filename}
+          {citation.page_number !== null
+            ? ` · page ${citation.page_number}`
+            : ""}
+          {citation.section ? ` · ${citation.section}` : ""}
+        </p>
+        <blockquote>{citation.snippet}</blockquote>
+        <p className="citation-score">
+          Similarity {Math.max(0, Math.round(citation.score * 100))}% · chunk #
+          {citation.chunk_index}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
