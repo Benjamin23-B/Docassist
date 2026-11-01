@@ -14,10 +14,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import ChatRateLimit, CurrentUser, DbSession
 from app.core.config import get_settings
 from app.db.models import ChatSession, Document, Message, MessageRole
 from app.db.session import SessionLocal
+from app.rag.agent import run_agent
 from app.rag.llm import (
     ChatTurn,
     LLMProviderError,
@@ -27,6 +28,7 @@ from app.rag.llm import (
 from app.rag.reranker import rerank_chunks
 from app.rag.retriever import RetrievedChunk, retrieve_chunks
 from app.rag.rewriter import rewrite_query
+from app.rag.tools import ToolCall
 from app.schemas.chat import (
     AskRequest,
     ChatMessageRead,
@@ -217,6 +219,7 @@ def ask_question(
     payload: AskRequest,
     db: DbSession,
     current_user: CurrentUser,
+    _: ChatRateLimit,
 ) -> StreamingResponse:
     session = _get_owned_session(session_id, db, current_user.id)
     session_id_value = session.id
@@ -239,15 +242,33 @@ def ask_question(
 
     reranking = settings.reranker_provider != "none"
     candidate_k = settings.rerank_candidate_k if reranking else settings.retrieval_top_k
+    tool_calls: list[ToolCall] = []
 
     try:
-        chunks = retrieve_chunks(
-            db,
-            user_id=current_user.id,
-            query=search_query,
-            doc_scope=session.doc_scope,
-            top_k=candidate_k,
-        )
+        if settings.agent_enabled:
+            agent_result = run_agent(
+                db,
+                user_id=current_user.id,
+                question=search_query,
+                document_ids=list(session.doc_scope),
+                candidate_k=candidate_k,
+                top_k=settings.retrieval_top_k,
+            )
+            chunks = agent_result.chunks
+            tool_calls = agent_result.tool_calls
+        else:
+            chunks = retrieve_chunks(
+                db,
+                user_id=current_user.id,
+                query=search_query,
+                doc_scope=session.doc_scope,
+                top_k=candidate_k,
+            )
+            chunks = rerank_chunks(
+                chunks,
+                query=search_query,
+                top_k=settings.retrieval_top_k,
+            )
     except EmbeddingProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -258,12 +279,6 @@ def ask_question(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The embedding provider is unavailable. Please retry.",
         ) from exc
-
-    chunks = rerank_chunks(
-        chunks,
-        query=search_query,
-        top_k=settings.retrieval_top_k,
-    )
 
     try:
         llm = get_llm_provider()
@@ -305,8 +320,10 @@ def ask_question(
                     "rewritten": search_query != " ".join(question.split()),
                     "hybrid": settings.hybrid_search_enabled,
                     "reranked": reranking,
+                    "agent": settings.agent_enabled,
                     "matches": len(chunks),
                 },
+                "tools": [call.as_dict() for call in tool_calls],
             },
         )
 
@@ -328,6 +345,7 @@ def ask_question(
                     content=partial,
                     citations=citations,
                     latency_ms=_elapsed_ms(started),
+                    tool_calls=tool_calls,
                 )
             detail = (
                 str(exc)
@@ -353,6 +371,7 @@ def ask_question(
             citations=citations,
             latency_ms=latency_ms,
             tokens_used=tokens_used,
+            tool_calls=tool_calls,
         )
         yield _sse(
             "done",
@@ -474,6 +493,7 @@ def _persist_assistant_message(
     citations: list[Citation],
     latency_ms: int,
     tokens_used: int | None = None,
+    tool_calls: list[ToolCall] | None = None,
 ) -> None:
     if not content:
         return
@@ -487,6 +507,7 @@ def _persist_assistant_message(
                     role=MessageRole.ASSISTANT.value,
                     content=content,
                     citations=[citation.model_dump(mode="json") for citation in citations],
+                    tool_calls=[call.as_dict() for call in tool_calls or []],
                     tokens_used=(tokens_used if tokens_used is not None else count_tokens(content)),
                     latency_ms=latency_ms,
                 )

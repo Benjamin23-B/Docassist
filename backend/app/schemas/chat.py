@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,6 +32,14 @@ class FeedbackRead(BaseModel):
     rating: Literal[-1, 1]
     comment: str | None = None
     created_at: datetime
+
+
+class ToolCallRead(BaseModel):
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["ok", "error"] = "ok"
+    matches: int = 0
+    detail: str | None = None
 
 
 class FeedbackCreate(BaseModel):
@@ -79,6 +87,7 @@ class ChatMessageRead(BaseModel):
     tokens_used: int | None = None
     latency_ms: int | None = None
     feedback: FeedbackRead | None = None
+    tool_calls: list[ToolCallRead] = Field(default_factory=list)
     created_at: datetime
 
 

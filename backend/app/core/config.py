@@ -104,6 +104,18 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 800
     llm_stream_delay_seconds: float = 0.02
 
+    # --- Agent & production (Phase 6) ---------------------------------------
+    agent_enabled: bool = True
+    agent_provider: Literal["deterministic", "openai"] = "deterministic"
+    agent_max_tool_calls: int = 4
+
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = 120
+    rate_limit_window_seconds: int = 60
+    chat_rate_limit_requests: int = 20
+    chat_rate_limit_window_seconds: int = 60
+    rate_limit_key_prefix: str = "rag:ratelimit"
+
     @field_validator("allowed_extensions")
     @classmethod
     def _normalise_extensions(cls, value: list[str]) -> list[str]:
@@ -170,6 +182,16 @@ class Settings(BaseSettings):
             raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
         if self.llm_stream_delay_seconds < 0:
             raise ValueError("LLM_STREAM_DELAY_SECONDS must not be negative")
+        if self.agent_max_tool_calls <= 0:
+            raise ValueError("AGENT_MAX_TOOL_CALLS must be positive")
+        if self.rate_limit_requests <= 0:
+            raise ValueError("RATE_LIMIT_REQUESTS must be positive")
+        if self.rate_limit_window_seconds <= 0:
+            raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be positive")
+        if self.chat_rate_limit_requests <= 0:
+            raise ValueError("CHAT_RATE_LIMIT_REQUESTS must be positive")
+        if self.chat_rate_limit_window_seconds <= 0:
+            raise ValueError("CHAT_RATE_LIMIT_WINDOW_SECONDS must be positive")
         return self
 
     @property
@@ -188,6 +210,9 @@ class Settings(BaseSettings):
                 raise RuntimeError("OPENAI_API_KEY is required when QUERY_REWRITE_PROVIDER=openai")
         if self.reranker_provider == "cohere" and not self.cohere_api_key:
             raise RuntimeError("COHERE_API_KEY is required when RERANKER_PROVIDER=cohere")
+        if self.agent_enabled and self.agent_provider == "openai":
+            if not self.openai_api_key:
+                raise RuntimeError("OPENAI_API_KEY is required when AGENT_PROVIDER=openai")
         if self.environment.lower() != "production":
             return
         if self.jwt_secret in INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32:

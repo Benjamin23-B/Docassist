@@ -22,7 +22,7 @@ An end-to-end, enterprise-ready Retrieval-Augmented Generation (RAG) and Agentic
 
 ## 🔍 Overview
 
-This platform provides asynchronous document ingestion, grounded hybrid retrieval, contextual query rewriting, reranked streaming answers with source citations, and a scope-controlled chat interface. The roadmap continues with tool-calling autonomous agents and an evaluation suite.
+This platform provides asynchronous document ingestion, grounded hybrid retrieval, contextual query rewriting, reranked streaming answers with source citations, scoped tool-using agents, a golden-set evaluation runner, per-identity rate limits, and a scope-controlled chat interface.
 
 ---
 
@@ -41,8 +41,8 @@ This platform provides asynchronous document ingestion, grounded hybrid retrieva
 ┌──────▼─────────┐        ┌────────▼─────────┐        ┌────────▼─────────┐
 │ Ingestion      │        │ RAG / Agent      │        │ Metadata DB      │
 │ Worker (Celery)│        │ Service          │        │ (PostgreSQL)     │
-│ parse→chunk→   │        │ rewrite→retrieve │        │ users, docs,     │
-│ embed→index    │        │ →rerank→generate │        │ chats, messages  │
+│ parse→chunk→   │        │ rewrite→plan→    │        │ users, docs,     │
+│ embed→index    │        │ tools→rerank→gen │        │ chats, messages  │
 └──────┬─────────┘        └────────┬─────────┘        └──────────────────┘
        │                           │
 ┌──────▼───────────┐      ┌────────▼─────────┐     ┌──────────────────────┐
@@ -68,7 +68,8 @@ This platform provides asynchronous document ingestion, grounded hybrid retrieva
 - **Grounded Generation**: System prompt enforcement restricting responses exclusively to verified context.
 - **Clickable Citations**: UI citation chips mapped directly to document and page numbers.
 - **Real-time Streaming**: Server-Sent Events (SSE) for low-latency streaming responses.
-- **Agentic Tool Loop** *(Phase 6)*: Support for function/tool calling (`search_documents`, `summarize_document`, `compare_documents`, `get_page`).
+- **Agentic Tool Loop** *(Phase 6)*: Scoped tool planning and execution (`search_documents`, `summarize_document`, `compare_documents`, `get_page`) with a persisted trace shown in the UI.
+- **Production Safeguards** *(Phase 6)*: Per-user/IP rate limits with Redis and a process-local fallback, plus a CI-friendly golden-set evaluation runner.
 
 ### 3. Session & Document Management
 - Dynamic document scoping: query across all documents or target a selected subset.
@@ -128,6 +129,33 @@ question ──► rewrite (history) ──► dense top-N ─┐
 - **Hybrid retrieval**: dense cosine search over `pgvector` and PostgreSQL full-text search (`websearch_to_tsquery` + `ts_rank_cd`) each return candidates. Weighted reciprocal rank fusion (`HYBRID_RRF_K`, `HYBRID_VECTOR_WEIGHT`, `HYBRID_KEYWORD_WEIGHT`) merges them without needing comparable score scales, and the same tenant/status/scope filters apply to both.
 - **Reranking**: `RERANK_CANDIDATE_K` candidates are re-scored to `RETRIEVAL_TOP_K` passages. `RERANKER_PROVIDER=deterministic` combines query-term coverage, filename/section overlap, phrase matches and prior retrieval score; `cohere` calls a hosted cross-encoder. Provider failures fall back to the fused order.
 - **Observability**: the SSE `meta` event now includes the rewritten `query` and a `retrieval` object (`rewritten`, `hybrid`, `reranked`, `matches`).
+
+---
+
+## 🤖 Agent Loop & Production (Phase 6)
+
+```text
+question ──► rewrite ──► plan tools ──┬─► search_documents ─┐
+                                      ├─► summarize_document ├─► dedupe ──► rerank ──► answer
+                                      ├─► compare_documents  │
+                                      └─► get_page          ─┘
+```
+
+- **Tool planning**: `AGENT_PROVIDER=deterministic` (default) maps intents to an auditable plan — search always runs; with a scoped session, summaries add `summarize_document`, two-document comparisons add `compare_documents`, and “page N” reads add `get_page`. `AGENT_PROVIDER=openai` asks a chat model for the same JSON plan and falls back to the deterministic plan on any error.
+- **Scope enforcement**: tool arguments are validated against the session’s `doc_scope` before execution, and every database read still filters by `user_id` and `status='ready'`. A hallucinated or out-of-scope document ID becomes an error entry in the trace, never a cross-tenant read.
+- **Trace and audit**: each assistant message stores `tool_calls` JSONB (`name`, `arguments`, `status`, `matches`, `detail`) via migration `0002_message_tool_calls`. The SSE `meta` event exposes the same list as `tools`, and the UI renders chips such as `search · 20`, `summarize · 4`, or a red `error` chip.
+- **Rate limits**: a global fixed-window limiter covers every `/api/v1` request, keyed by JWT subject or client IP, and a stricter limiter protects the chat ask endpoint. Limits are shared through Redis when `REDIS_URL` is reachable; otherwise the limiter degrades to a process-local window so the API remains available. Responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`; rejected requests return `429` with `Retry-After`.
+- **Configuration**: `AGENT_ENABLED`, `AGENT_PROVIDER`, `AGENT_MAX_TOOL_CALLS`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`, `CHAT_RATE_LIMIT_REQUESTS`, and `CHAT_RATE_LIMIT_WINDOW_SECONDS` (see `.env.example`). Apply the new trace column with `make migrate`.
+
+```bash
+# Run the golden-set evaluation against one tenant's indexed documents.
+make eval EMAIL=you@example.com
+# Or with explicit thresholds and a JSON report for CI:
+cd backend
+python -m evals.run_eval --dataset evals/golden.example.json \
+  --user-email you@example.com --top-k 6 \
+  --min-hit-rate 0.8 --min-mrr 0.6 --output reports/eval.json
+```
 
 ---
 
@@ -201,6 +229,7 @@ question ──► rewrite (history) ──► dense top-N ─┐
 | `role` | `VARCHAR(16)` | `user` \| `assistant` \| `system` |
 | `content` | `TEXT` | Raw text response |
 | `citations` | `JSONB` | Source chips `[{doc_id, page, snippet}]` |
+| `tool_calls` | `JSONB` | Agent trace `[{name, arguments, status, matches, detail}]` |
 | `tokens_used` | `INTEGER` | Token consumption |
 | `latency_ms` | `INTEGER` | Response time in milliseconds |
 | `created_at` | `TIMESTAMPTZ` | Timestamp |
@@ -244,7 +273,7 @@ SSE events emitted by the ask endpoint:
 
 | Event | Data |
 |---|---|
-| `meta` | `session_id`, `message_id`, `model`, `citations[]`, `query`, `retrieval` |
+| `meta` | `session_id`, `message_id`, `model`, `citations[]`, `query`, `retrieval`, `tools[]` |
 | `token` | `text` |
 | `done` | `message_id`, `latency_ms`, `tokens_used` |
 | `error` | `detail`, `message_id` |
@@ -276,14 +305,16 @@ rag/
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   ├── alembic.ini
-│   ├── alembic/                # DB migrations (0001_initial = full schema)
+│   ├── alembic/                # DB migrations (0001 schema, 0002 tool trace)
 │   │   ├── env.py
 │   │   └── versions/
+│   ├── evals/                  # Golden dataset + evaluation CLI
 │   ├── tests/                  # Unit tests (pytest)
 │   └── app/
-│       ├── main.py             # FastAPI entrypoint, /healthz, CORS
-│       ├── core/               # App configuration & security
+│       ├── main.py             # FastAPI entrypoint, /healthz, CORS, rate limiting
+│       ├── core/               # App configuration, security & rate limiting
 │       │   ├── config.py
+│       │   ├── rate_limit.py   # Redis fixed-window limiter + local fallback
 │       │   └── security.py     # bcrypt + JWT
 │       ├── db/                 # DB engine, session & ORM models
 │       │   ├── base.py
@@ -294,10 +325,13 @@ rag/
 │       │   ├── storage.py      # S3/MinIO client & presigned URLs
 │       │   ├── upload.py       # Validation, hashing, streaming
 │       │   └── export.py       # Markdown transcript rendering
-│       ├── rag/                # Retrieval & generation (Phase 3–5)
+│       ├── evaluation/         # Golden-set schema + retrieval/answer metrics
+│       ├── rag/                # Retrieval, generation & agents (Phase 3–6)
 │       │   ├── retriever.py    # Dense + keyword search, reciprocal rank fusion
 │       │   ├── rewriter.py     # Contextual follow-up rewriting
 │       │   ├── reranker.py     # Deterministic and Cohere candidate reranking
+│       │   ├── tools.py        # Search/summarize/compare/page tool implementations
+│       │   ├── agent.py        # Deterministic/OpenAI planning, scope checks, trace
 │       │   └── llm.py          # Grounded prompt + deterministic/OpenAI LLMs
 │       ├── workers/            # Ingestion pipeline (Celery)
 │       │   ├── celery_app.py   # Broker/queue configuration
@@ -337,23 +371,47 @@ rag/
 | **Phase 3** | ✅ Core RAG & Streaming | Vector search, basic prompt template, SSE streaming endpoint, and React chat interface |
 | **Phase 4** | ✅ Document & History Scope | Document management, scoped conversation sessions with rename/export/delete, and answer feedback |
 | **Phase 5** | ✅ Advanced Search | Query rewriting from history, hybrid vector + keyword retrieval with RRF, and candidate reranking |
-| **Phase 6** | Agent Loop & Production | Autonomous tool invocation (`search`, `summarize`), automated evaluation suite, rate limits |
+| **Phase 6** | ✅ Agent Loop & Production | Scoped tool execution with persisted traces, golden-set evaluation runner, Redis-backed rate limits |
 
 ---
 
 ## 📊 Evaluation & Quality Metrics
 
-A continuous golden test set (30–50 domain-specific question/ground-truth pairs) assesses performance:
+`backend/evals/run_eval.py` runs a golden-set dataset against a tenant's indexed documents using the same agent/retrieval/reranking path as chat. It needs no external API keys: answers are generated with the offline extractive provider, and quality is approximated with deterministic lexical judges.
 
-1. **Retrieval Precision**:
-   - **Hit Rate @ K**: Frequency of the target passage appearing in the top $K$ results.
-   - **MRR (Mean Reciprocal Rank)**: Average rank of the first relevant chunk.
-2. **Answer Quality (LLM-as-a-Judge)**:
-   - **Faithfulness**: Detection of hallucinations or statements unsupported by source chunks.
-   - **Answer Relevancy**: Degree to which the answer directly addresses the query.
-3. **Operational Metrics**:
-   - End-to-end latency (Time-to-First-Token and total generation time).
-   - Ingestion throughput (pages per minute) and API cost tracking.
+**Dataset format** (`backend/evals/golden.example.json`):
+
+```json
+{
+  "name": "example-handbook",
+  "cases": [
+    {
+      "id": "annual-leave",
+      "question": "How many days of annual leave do employees receive?",
+      "document": "handbook.md",
+      "keywords": ["annual leave"],
+      "expected_answer_contains": ["annual leave"]
+    }
+  ]
+}
+```
+
+A case is relevant when the expected filename matches and, if keywords are present, at least one keyword occurs in the chunk. Either signal may be omitted, but at least one is required. Keep 30–50 cases for a meaningful trend.
+
+**Reported metrics**:
+
+1. **Retrieval quality**
+   - **Hit Rate @ K**: share of questions with at least one relevant chunk in the top K.
+   - **MRR**: mean reciprocal rank of the first relevant chunk.
+   - **Precision @ K**: share of retrieved chunks that are relevant.
+2. **Answer quality (offline proxies)**
+   - **Faithfulness**: share of answer terms supported by the retrieved context.
+   - **Answer Relevancy**: share of question terms echoed by the answer.
+   - **Answer Contains**: all configured `expected_answer_contains` strings appear in the answer.
+3. **Operational**
+   - Retrieval latency and total evaluation latency per question; the full per-case report is written with `--output`.
+
+Use `--min-hit-rate`, `--min-mrr`, `--min-faithfulness`, and `--min-answer-relevancy` to fail CI (exit status `1`) when quality regresses. Add `--no-agent` to bypass the configured agent planner and score retrieval only.
 
 ---
 
@@ -363,6 +421,8 @@ A continuous golden test set (30–50 domain-specific question/ground-truth pair
 - **Prompt Injection Defense**: Document text is isolated inside delimited context tags and treated as untrusted input.
 - **Upload Validation**: Extension, MIME-type, and payload size verification before queuing.
 - **Fail-Safe Pipelines**: Celery exponential retries and dead-letter queue (DLQ) for failed document jobs.
+- **Abuse Protection**: Per-identity fixed-window rate limits (Redis shared, local fallback) with standard `X-RateLimit-*` headers, plus a stricter chat ask budget.
+- **Auditable Agents**: Planned tool calls are scope-validated, tenant-filtered, persisted on the message, and returned in the SSE `meta` event.
 - **Model Version Isolation**: Storing `model_name` with chunk embeddings prevents silent similarity degradation across upgrades.
 
 ---

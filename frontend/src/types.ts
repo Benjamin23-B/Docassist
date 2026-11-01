@@ -49,12 +49,23 @@ export interface Feedback {
   created_at: string;
 }
 
+export type ToolStatus = "ok" | "error";
+
+export interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+  status: ToolStatus;
+  matches: number;
+  detail: string | null;
+}
+
 export interface Message {
   id: string;
   session_id: string;
   role: "user" | "assistant" | "system";
   content: string;
   citations: Citation[];
+  tool_calls: ToolCall[];
   tokens_used: number | null;
   latency_ms: number | null;
   feedback: Feedback | null;
@@ -83,6 +94,7 @@ export interface RetrievalInfo {
   rewritten: boolean;
   hybrid: boolean;
   reranked: boolean;
+  agent?: boolean;
   matches: number;
 }
 
@@ -93,6 +105,7 @@ export interface MetaEvent {
   citations: Citation[];
   query?: string;
   retrieval?: RetrievalInfo;
+  tools?: ToolCall[];
 }
 
 export interface DoneEvent {

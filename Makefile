@@ -1,4 +1,4 @@
-.PHONY: env up down restart logs logs-worker logs-frontend ps migrate revision shell test lint format
+.PHONY: env up down restart logs logs-worker logs-frontend ps migrate revision shell test lint format eval
 
 env:
 	@test -f .env || cp .env.example .env
@@ -40,3 +40,7 @@ lint:
 
 format:
 	cd backend && ruff format .
+
+# Usage: make eval EMAIL=you@example.com [DATASET=evals/golden.example.json]
+eval:
+	cd backend && python -m evals.run_eval --dataset "$(or $(DATASET),evals/golden.example.json)" --user-email "$(EMAIL)"

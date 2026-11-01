@@ -1,0 +1,25 @@
+{
+  "name": "example-handbook",
+  "description": "Replace these cases with 30-50 question/ground-truth pairs from your own corpus. A case is relevant when the expected filename and/or keyword is matched.",
+  "cases": [
+    {
+      "id": "annual-leave",
+      "question": "How many days of annual leave do employees receive?",
+      "document": "handbook.md",
+      "keywords": ["annual leave"],
+      "expected_answer_contains": ["annual leave"]
+    },
+    {
+      "id": "expense-window",
+      "question": "How long do I have to submit an expense report?",
+      "document": "finance-policy.pdf",
+      "keywords": ["expense", "days"],
+      "expected_answer_contains": ["expense"]
+    },
+    {
+      "id": "security-training",
+      "question": "When is security awareness training due?",
+      "keywords": ["security awareness"]
+    }
+  ]
+}

@@ -218,6 +218,12 @@ class Message(TimestampMixin, Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
+    tool_calls: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
     tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

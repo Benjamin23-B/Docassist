@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.rate_limit import get_chat_rate_limiter
 from app.core.security import TokenError, decode_access_token
 from app.db.models import User
 from app.db.session import get_db
@@ -46,3 +47,16 @@ def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def enforce_chat_rate_limit(current_user: CurrentUser) -> None:
+    result = get_chat_rate_limiter().check(f"user:{current_user.id}")
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many questions. Please wait before trying again.",
+            headers=result.headers(),
+        )
+
+
+ChatRateLimit = Annotated[None, Depends(enforce_chat_rate_limit)]

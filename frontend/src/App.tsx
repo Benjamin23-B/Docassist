@@ -16,6 +16,7 @@ import type {
   DocumentItem,
   Message,
   RetrievalInfo,
+  ToolCall,
   User,
 } from "./types";
 
@@ -502,6 +503,7 @@ function Workspace({
         role: "user",
         content: text,
         citations: [],
+        tool_calls: [],
         tokens_used: null,
         latency_ms: null,
         feedback: null,
@@ -520,6 +522,7 @@ function Workspace({
           role: "assistant",
           content: "",
           citations: [],
+          tool_calls: [],
           tokens_used: null,
           latency_ms: null,
           feedback: null,
@@ -540,6 +543,7 @@ function Workspace({
                     id: meta.message_id,
                     session_id: meta.session_id,
                     citations: meta.citations,
+                    tool_calls: meta.tools ?? [],
                     model: meta.model,
                     retrieval: meta.retrieval,
                     rewrittenQuery: meta.retrieval?.rewritten
@@ -916,6 +920,26 @@ function EmptyState({ onPick }: { onPick: (question: string) => void }) {
   );
 }
 
+function toolLabel(tool: ToolCall): string {
+  const page = tool.arguments.page_number;
+  if (
+    tool.name === "get_page" &&
+    (typeof page === "number" || typeof page === "string")
+  ) {
+    return `page ${page}`;
+  }
+  switch (tool.name) {
+    case "search_documents":
+      return "search";
+    case "summarize_document":
+      return "summarize";
+    case "compare_documents":
+      return "compare";
+    default:
+      return tool.name.replaceAll("_", " ");
+  }
+}
+
 function MessageBubble({
   message,
   onCitation,
@@ -960,6 +984,14 @@ function MessageBubble({
               rewritten
             </span>
           )}
+          {message.retrieval?.agent && (
+            <span
+              className="model-badge alt"
+              title="Agent planned tool calls for this answer"
+            >
+              agent
+            </span>
+          )}
         </div>
 
         <div className="message-content">
@@ -987,6 +1019,28 @@ function MessageBubble({
                   </span>
                 )}
               </button>
+            ))}
+          </div>
+        )}
+
+        {!isUser && message.tool_calls.length > 0 && (
+          <div className="tool-trace" aria-label="Agent tool calls">
+            {message.tool_calls.map((tool, index) => (
+              <span
+                key={`${tool.name}-${index}`}
+                className={`tool-chip ${tool.status === "error" ? "error" : ""}`}
+                title={
+                  tool.status === "error"
+                    ? tool.detail ?? "Tool failed"
+                    : `${JSON.stringify(tool.arguments)} · ${tool.matches} matches`
+                }
+              >
+                <span className="tool-dot" />
+                {toolLabel(tool)}
+                {tool.status === "ok" && tool.matches > 0 && (
+                  <span className="tool-matches">{tool.matches}</span>
+                )}
+              </span>
             ))}
           </div>
         )}

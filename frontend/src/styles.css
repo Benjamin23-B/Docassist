@@ -764,6 +764,50 @@ ul {
   flex: none;
 }
 
+/* ---------- Agent tool trace ---------- */
+
+.tool-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(53, 208, 186, 0.24);
+  background: rgba(53, 208, 186, 0.07);
+  color: var(--accent-2);
+  padding: 3px 9px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: default;
+}
+
+.tool-chip.error {
+  color: var(--danger);
+  border-color: rgba(255, 107, 129, 0.35);
+  background: rgba(255, 107, 129, 0.08);
+}
+
+.tool-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.tool-matches {
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  padding-left: 6px;
+  letter-spacing: 0;
+}
+
 /* ---------- Empty state ---------- */
 
 .empty-state {
