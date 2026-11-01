@@ -114,6 +114,7 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 | `status` | `VARCHAR(32)` | `queued` \| `processing` \| `ready` \| `failed` |
 | `error_message`| `TEXT` | Error trace if failed |
 | `created_at` | `TIMESTAMPTZ` | Timestamp |
+| `updated_at` | `TIMESTAMPTZ` | Last status change (Phase 1 extension for polling) |
 
 ### `chunks`
 | Column | Type | Description |
@@ -161,19 +162,36 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 
 ## 📡 API Endpoints
 
+### Authentication
+- `POST /api/v1/auth/register` - Create an account (`email`, `password`)
+- `POST /api/v1/auth/token` - OAuth2 password flow; send `username=<email>` as form data
+- `GET /api/v1/auth/me` - Current user profile
+
 ### Documents
 - `POST /api/v1/documents` - Upload document file (multipart/form-data)
 - `GET /api/v1/documents` - List uploaded documents (pagination, status filters)
-- `GET /api/v1/documents/{id}` - Get processing status and details
-- `DELETE /api/v1/documents/{id}` - Delete document, associated chunks, and vectors
-- `POST /api/v1/documents/{id}/reindex` - Trigger re-chunking and re-embedding
+- `GET /api/v1/documents/{id}` - Get processing status and details (incl. chunk count)
+- `GET /api/v1/documents/{id}/download` - Redirect to a short-lived presigned URL
+- `DELETE /api/v1/documents/{id}` - Delete document, associated chunks, and stored file
+- `POST /api/v1/documents/{id}/reindex` - Trigger re-chunking and re-embedding *(Phase 4)*
 
-### Chat & Q&A
+### Chat & Q&A *(Phase 3+)*
 - `POST /api/v1/chat/sessions` - Create chat session (with optional document scoping)
 - `GET /api/v1/chat/sessions` - List active sessions
 - `GET /api/v1/chat/sessions/{id}` - Get session message history
 - `POST /api/v1/chat/sessions/{id}/ask` - Submit query & stream response via SSE
 - `POST /api/v1/messages/{id}/feedback` - Submit helpfulness rating / comments
+
+### Service
+- `GET /` - Service metadata
+- `GET /healthz` - Liveness + database connectivity check
+
+### Upload behaviour (Phase 1)
+- Supported types: `.pdf`, `.md`, `.markdown`, `.txt`, `.docx`, `.html`, `.htm` (configurable)
+- Maximum size: 50 MB by default (`MAX_UPLOAD_SIZE_MB`), enforced while streaming
+- Files are hashed (SHA-256) during upload; re-uploading identical bytes returns `409 Conflict`
+  with the existing document ID in the `X-Document-Id` header
+- Objects are stored at `s3://<bucket>/users/<user_id>/documents/<document_id>/<filename>`
 
 ---
 
@@ -181,44 +199,40 @@ This platform provides asynchronous document ingestion, multi-stage hybrid retri
 
 ```text
 rag/
-├── docker-compose.yml          # PostgreSQL, pgvector, Redis, MinIO
+├── docker-compose.yml          # PostgreSQL+pgvector, Redis, MinIO, API
+├── Makefile                    # Common dev commands
+├── .env.example                # Environment template
 ├── README.md                   # System documentation
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── alembic/                # DB migrations
+│   ├── requirements-dev.txt
+│   ├── alembic.ini
+│   ├── alembic/                # DB migrations (0001_initial = full schema)
+│   │   ├── env.py
+│   │   └── versions/
+│   ├── tests/                  # Unit tests (pytest)
 │   └── app/
-│       ├── main.py             # FastAPI entrypoint
+│       ├── main.py             # FastAPI entrypoint, /healthz, CORS
 │       ├── core/               # App configuration & security
 │       │   ├── config.py
-│       │   └── security.py
-│       ├── db/                 # DB engine, session & models
+│       │   └── security.py     # bcrypt + JWT
+│       ├── db/                 # DB engine, session & ORM models
+│       │   ├── base.py
 │       │   ├── session.py
 │       │   └── models.py
-│       ├── api/                # REST endpoints
-│       │   └── v1/
-│       │       ├── auth.py
-│       │       ├── documents.py
-│       │       └── chat.py
-│       ├── workers/            # Ingestion pipeline (Celery)
-│       │   ├── celery_app.py
-│       │   ├── parser.py
-│       │   ├── chunker.py
-│       │   └── embedder.py
-│       └── rag/                # Retrieval, reranking & LLM integration
-│           ├── retriever.py
-│           ├── reranker.py
-│           ├── prompt.py
-│           └── agent.py
-└── frontend/
-    ├── package.json
-    ├── src/
-    │   ├── components/
-    │   │   ├── uploader/
-    │   │   ├── chat/
-    │   │   └── history/
-    │   ├── hooks/
-    │   └── services/
+│       ├── schemas/            # Pydantic request/response models
+│       ├── services/
+│       │   ├── storage.py      # S3/MinIO client & presigned URLs
+│       │   └── upload.py       # Validation, hashing, streaming
+│       └── api/                # REST endpoints
+│           ├── deps.py         # Auth dependencies
+│           └── v1/
+│               ├── auth.py
+│               ├── documents.py
+│               └── router.py
+├── workers/                    # Ingestion pipeline (Phase 2)
+└── frontend/                   # React app (Phase 3)
 ```
 
 ---
@@ -227,7 +241,7 @@ rag/
 
 | Phase | Milestone | Deliverables |
 |---|---|---|
-| **Phase 1** | Foundation & Storage | Database schema, authentication, file storage (S3/MinIO), and upload endpoint |
+| **Phase 1** | ✅ Foundation & Storage | Database schema, authentication, file storage (S3/MinIO), and upload endpoint |
 | **Phase 2** | Ingestion Engine | Celery pipeline: parsing, recursive chunking, batch embeddings, pgvector indexing |
 | **Phase 3** | Core RAG & Streaming | Vector search, basic prompt template, SSE streaming endpoint, and React chat interface |
 | **Phase 4** | Document & History Scope | Document management, conversation sessions, reindexing, and document-specific scoping |
@@ -264,5 +278,101 @@ A continuous golden test set (30–50 domain-specific question/ground-truth pair
 
 ## 🚀 Getting Started
 
-*(Detailed installation, Docker orchestration, and environment setup instructions will be updated here as Phase 1 commences.)*
+### Prerequisites
+
+- Docker Engine + Docker Compose v2
+- Python 3.12 (only needed for running tests or the API outside Docker)
+
+### 1. Configure the environment
+
+```bash
+cp .env.example .env
+# Generate a strong secret (required for production):
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Set the generated value as `JWT_SECRET` in `.env`.
+
+### 2. Start the stack
+
+```bash
+make up        # = docker compose up -d --build
+docker compose ps
+```
+
+This starts:
+
+| Service | URL | Credentials |
+|---|---|---|
+| API | http://localhost:8000 | — |
+| Swagger UI | http://localhost:8000/docs | — |
+| MinIO console | http://localhost:9001 | `minioadmin` / `minioadmin` |
+| PostgreSQL | `localhost:5432` | `rag` / `rag` |
+| Redis | `localhost:6379` | — |
+
+The API container applies Alembic migrations automatically on start. To run them
+manually:
+
+```bash
+make migrate   # = docker compose exec api alembic upgrade head
+```
+
+### 3. Create a user and upload a document
+
+```bash
+# Register
+curl -X POST http://localhost:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "strong-password-123"}'
+
+# Obtain a token (OAuth2 password flow uses `username` for the email)
+curl -X POST http://localhost:8000/api/v1/auth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=you@example.com&password=strong-password-123"
+
+# Upload
+curl -X POST http://localhost:8000/api/v1/documents \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@./handbook.pdf"
+
+# List
+curl "http://localhost:8000/api/v1/documents?page=1&page_size=20" \
+  -H "Authorization: Bearer <token>"
+```
+
+### 4. Run without Docker (optional)
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+export DATABASE_URL="postgresql+psycopg://rag:rag@localhost:5432/rag"
+export S3_ENDPOINT_URL="http://localhost:9000"
+
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+### 5. Tests and linting
+
+```bash
+cd backend
+pytest          # unit tests: auth, upload validation, OpenAPI/DDL checks
+ruff check .
+```
+
+### Phase 1 notes
+
+- The full schema (users, documents, chunks, chat sessions, messages, feedback)
+  is created up front, including the `pgvector` HNSW index and generated
+  `tsvector` column, so Phase 2 can index chunks without further migrations.
+- Uploaded documents remain in `queued` status until the Celery ingestion
+  worker from Phase 2 picks them up.
+- Object storage is created automatically (and by the `minio-init` service),
+  so no manual bucket setup is required.
+- `S3_PUBLIC_ENDPOINT_URL` controls the host embedded in presigned download
+  URLs. Inside Docker the API talks to `http://minio:9000`, while browsers use
+  the public value (default `http://localhost:9000`).
+
 
