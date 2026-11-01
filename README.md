@@ -72,7 +72,7 @@ This platform provides asynchronous document ingestion, grounded vector retrieva
 
 ### 3. Session & Document Management
 - Dynamic document scoping: query across all documents or target a selected subset.
-- Session-based conversation logs with export, rename, and user feedback mechanisms.
+- Session-based conversation logs with rename, Markdown export, deletion, and per-answer helpfulness feedback.
 
 ---
 
@@ -104,6 +104,16 @@ question ──► embed ──► pgvector top-k ──► grounded prompt ─�
 - **Streaming**: `POST /api/v1/chat/sessions/{id}/ask` returns `text/event-stream` with `meta` (citations + model), `token`, `done` (latency, token estimate) and `error` events.
 - **LLM providers**: `LLM_PROVIDER=deterministic` (default; offline extractive answers for development and tests) or `openai` (streaming chat completions via `LLM_MODEL`, default `gpt-4o-mini`).
 - **Persistence**: user and assistant messages store citation JSON, token estimates and latency; the session title is derived from the first question.
+
+---
+
+## 🗂️ Document & History Scope (Phase 4)
+
+- **Document management**: tenant-scoped listing and status polling, short-lived presigned downloads, reindexing, and cascade deletion of chunks plus the stored object.
+- **Conversation history**: sessions are listed newest-first, reopened with their full message history, renamed, and deleted (messages and feedback cascade).
+- **Scoped retrieval**: a session can be created against a validated subset of the user's documents; reopening it restores that scope.
+- **Answer feedback**: `POST /api/v1/messages/{id}/feedback` records one verdict per assistant message (`rating` = `1` helpful / `-1` not helpful) with an optional 2,000-character comment. Resubmitting replaces the existing verdict.
+- **Markdown export**: `GET /api/v1/chat/sessions/{id}/export` downloads a transcript with citations and feedback as a `.md` attachment.
 
 ---
 
@@ -209,9 +219,12 @@ question ──► embed ──► pgvector top-k ──► grounded prompt ─�
 ### Chat & Q&A
 - `POST /api/v1/chat/sessions` - Create chat session (with optional document scoping)
 - `GET /api/v1/chat/sessions` - List active sessions
-- `GET /api/v1/chat/sessions/{id}` - Get session message history
+- `GET /api/v1/chat/sessions/{id}` - Get session message history (including existing feedback)
+- `PATCH /api/v1/chat/sessions/{id}` - Rename a session
+- `DELETE /api/v1/chat/sessions/{id}` - Delete a session, its messages, and feedback
+- `GET /api/v1/chat/sessions/{id}/export` - Download the transcript as Markdown
 - `POST /api/v1/chat/sessions/{id}/ask` - Submit query & stream response via SSE
-- `POST /api/v1/messages/{id}/feedback` - Submit helpfulness rating / comments *(Phase 4)*
+- `POST /api/v1/messages/{id}/feedback` - Submit or update helpfulness feedback (`rating` `1`/`-1`, optional `comment`)
 
 SSE events emitted by the ask endpoint:
 
@@ -265,7 +278,8 @@ rag/
 │       ├── schemas/            # Pydantic models (auth, documents, chat)
 │       ├── services/
 │       │   ├── storage.py      # S3/MinIO client & presigned URLs
-│       │   └── upload.py       # Validation, hashing, streaming
+│       │   ├── upload.py       # Validation, hashing, streaming
+│       │   └── export.py       # Markdown transcript rendering
 │       ├── rag/                # Retrieval & generation (Phase 3)
 │       │   ├── retriever.py    # pgvector cosine search, doc scoping
 │       │   └── llm.py          # Grounded prompt + deterministic/OpenAI LLMs
@@ -282,9 +296,10 @@ rag/
 │           └── v1/
 │               ├── auth.py
 │               ├── documents.py
-│               ├── chat.py     # Sessions, retrieval, SSE streaming
+│               ├── chat.py     # Sessions, rename/export/delete, retrieval, SSE
+│               ├── messages.py # Answer feedback
 │               └── router.py
-└── frontend/                   # React 18 + Vite chat UI (Phase 3)
+└── frontend/                   # React 18 + Vite chat UI (Phase 3–4)
     ├── Dockerfile              # Multi-stage build served by nginx
     ├── nginx.conf              # SPA fallback + SSE-friendly /api proxy
     ├── package.json
@@ -304,7 +319,7 @@ rag/
 | **Phase 1** | ✅ Foundation & Storage | Database schema, authentication, file storage (S3/MinIO), and upload endpoint |
 | **Phase 2** | ✅ Ingestion Engine | Celery pipeline: parsing, recursive chunking, batch embeddings, pgvector indexing |
 | **Phase 3** | ✅ Core RAG & Streaming | Vector search, basic prompt template, SSE streaming endpoint, and React chat interface |
-| **Phase 4** | Document & History Scope | Document management, conversation sessions, and document-specific scoping (reindexing shipped in Phase 2) |
+| **Phase 4** | ✅ Document & History Scope | Document management, scoped conversation sessions with rename/export/delete, and answer feedback |
 | **Phase 5** | Advanced Search | Hybrid search (vector + keyword), query rewriting, cross-encoder reranking |
 | **Phase 6** | Agent Loop & Production | Autonomous tool invocation (`search`, `summarize`), automated evaluation suite, rate limits |
 
@@ -546,5 +561,21 @@ ruff check .
 - The React app (Vite + TypeScript) is built in a multi-stage image and served by
   nginx at port 3000. For local development use `npm run dev` and the Vite
   proxy instead.
+
+### Phase 4 notes
+
+- Feedback is one verdict per assistant message (unique `message_id`); posting
+  again updates it instead of creating duplicates. Feedback for user or system
+  messages is rejected with `400`.
+- Deleting a document removes its chunks through the database cascade and then
+  deletes the stored object; deleting a session cascades its messages and
+  feedback.
+- Session titles are derived from the first question but can be renamed to any
+  non-blank title up to 255 characters.
+- Transcripts are rendered in `app/services/export.py` and streamed as
+  `text/markdown` with a sanitised `Content-Disposition` filename.
+- The sidebar now exposes document reindex/delete and session
+  rename/export/delete; assistant messages have helpful/not-helpful controls
+  with an optional comment.
 
 

@@ -264,6 +264,17 @@ ul {
   border-radius: 8px;
 }
 
+.ghost.danger {
+  color: var(--danger);
+  border-color: rgba(255, 107, 129, 0.3);
+}
+
+.ghost.danger:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(255, 107, 129, 0.7);
+  background: rgba(255, 107, 129, 0.18);
+}
+
 .primary {
   border: none;
   border-radius: 11px;
@@ -381,6 +392,18 @@ ul {
   white-space: nowrap;
 }
 
+.doc-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+  padding-left: 24px;
+}
+
+.doc-actions .ghost.small {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -445,6 +468,41 @@ ul {
 .session-date {
   font-size: 11px;
   color: var(--muted);
+}
+
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-actions .ghost.small {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.rename-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.rename-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.rename-form input:focus {
+  border-color: rgba(109, 140, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(109, 140, 255, 0.12);
 }
 
 /* ---------- Messages ---------- */
@@ -569,6 +627,82 @@ ul {
 .message-foot {
   font-size: 11px;
   color: var(--muted);
+}
+
+.feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.feedback-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.feedback-label {
+  color: var(--muted);
+}
+
+.feedback-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(109, 140, 255, 0.5);
+}
+
+.feedback-btn.active {
+  color: var(--accent-2);
+  border-color: rgba(53, 208, 186, 0.55);
+  background: rgba(53, 208, 186, 0.1);
+}
+
+.feedback-comment-toggle {
+  font-size: 11.5px;
+}
+
+.feedback-saved {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+.feedback-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 620px;
+}
+
+.feedback-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  padding: 6px 9px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.feedback-form input:focus {
+  border-color: rgba(109, 140, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(109, 140, 255, 0.12);
 }
 
 .message-error,

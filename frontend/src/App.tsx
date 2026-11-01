@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 
-import { api, askQuestion, getToken, login, register, setToken } from "./api";
+import {
+  api,
+  askQuestion,
+  exportSession,
+  getToken,
+  login,
+  register,
+  setToken,
+} from "./api";
 import type {
   ChatSession,
   Citation,
@@ -15,6 +23,12 @@ type LocalMessage = Message & {
   error?: string;
   model?: string;
 };
+
+type FeedbackHandler = (
+  messageId: string,
+  rating: -1 | 1,
+  comment: string | null,
+) => Promise<void>;
 
 export default function App() {
   const [token, setTokenState] = useState<string | null>(() => getToken());
@@ -209,6 +223,10 @@ function Workspace({
   const [streaming, setStreaming] = useState(false);
   const [loadingSession, setLoadingSession] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [docActionId, setDocActionId] = useState<string | null>(null);
+  const [renamingSession, setRenamingSession] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [sessionAction, setSessionAction] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
 
@@ -287,6 +305,136 @@ function Workspace({
     }
   }
 
+  async function handleReindex(documentId: string) {
+    setDocActionId(documentId);
+    setError(null);
+    try {
+      await api.reindexDocument(documentId);
+      await refreshDocuments();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setDocActionId(null);
+    }
+  }
+
+  async function handleDeleteDocument(document: DocumentItem) {
+    if (
+      !window.confirm(
+        `Delete "${document.filename}" and its indexed chunks? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    setDocActionId(document.id);
+    setError(null);
+    try {
+      await api.deleteDocument(document.id);
+      setScope((previous) => previous.filter((id) => id !== document.id));
+      await refreshDocuments();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setDocActionId(null);
+    }
+  }
+
+  function startRename() {
+    if (!activeSession) {
+      return;
+    }
+    setRenameValue(activeSession.title);
+    setRenamingSession(true);
+  }
+
+  async function saveRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const title = renameValue.trim();
+    if (!title || !activeSessionId) {
+      return;
+    }
+
+    setSessionAction(true);
+    setError(null);
+    try {
+      const updated = await api.renameSession(activeSessionId, title);
+      setSessions((previous) =>
+        previous.map((session) =>
+          session.id === updated.id ? updated : session,
+        ),
+      );
+      setRenamingSession(false);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSessionAction(false);
+    }
+  }
+
+  async function handleDeleteSession() {
+    if (!activeSession) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `Delete "${activeSession.title}"? Its messages and feedback will be removed.`,
+      )
+    ) {
+      return;
+    }
+
+    setSessionAction(true);
+    setError(null);
+    try {
+      await api.deleteSession(activeSession.id);
+      setSessions((previous) =>
+        previous.filter((session) => session.id !== activeSession.id),
+      );
+      setActiveSessionId(null);
+      setMessages([]);
+      setRenamingSession(false);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSessionAction(false);
+    }
+  }
+
+  async function handleExportSession() {
+    if (!activeSession) {
+      return;
+    }
+
+    setSessionAction(true);
+    setError(null);
+    try {
+      const { filename, markdown } = await exportSession(activeSession.id);
+      downloadText(filename, markdown);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSessionAction(false);
+    }
+  }
+
+  async function handleFeedback(
+    messageId: string,
+    rating: -1 | 1,
+    comment: string | null,
+  ) {
+    try {
+      const saved = await api.feedback(messageId, rating, comment);
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.id === messageId ? { ...message, feedback: saved } : message,
+        ),
+      );
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+
   async function startNewChat() {
     setLoadingSession(true);
     setError(null);
@@ -295,6 +443,7 @@ function Workspace({
       setSessions((previous) => [session, ...previous]);
       setActiveSessionId(session.id);
       setMessages([]);
+      setRenamingSession(false);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -313,6 +462,7 @@ function Workspace({
       setActiveSessionId(sessionId);
       setMessages(detail.messages);
       setScope(detail.doc_scope);
+      setRenamingSession(false);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -351,6 +501,7 @@ function Workspace({
         citations: [],
         tokens_used: null,
         latency_ms: null,
+        feedback: null,
         created_at: new Date().toISOString(),
       };
       const pendingId = `pending-${Date.now()}`;
@@ -368,6 +519,7 @@ function Workspace({
           citations: [],
           tokens_used: null,
           latency_ms: null,
+          feedback: null,
           created_at: new Date().toISOString(),
           streaming: true,
         },
@@ -458,6 +610,8 @@ function Workspace({
     }
   }
 
+  const activeSession =
+    sessions.find((session) => session.id === activeSessionId) ?? null;
   const scopeLabel = scope.length
     ? `${scope.length} document${scope.length === 1 ? "" : "s"} in scope`
     : "All ready documents";
@@ -538,6 +692,25 @@ function Workspace({
                       {document.error_message}
                     </p>
                   )}
+                  <div className="doc-actions">
+                    {(document.status === "ready" ||
+                      document.status === "failed") && (
+                      <button
+                        className="ghost small"
+                        onClick={() => void handleReindex(document.id)}
+                        disabled={docActionId === document.id || streaming}
+                      >
+                        Reindex
+                      </button>
+                    )}
+                    <button
+                      className="ghost small danger"
+                      onClick={() => void handleDeleteDocument(document)}
+                      disabled={docActionId === document.id || streaming}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -554,6 +727,61 @@ function Workspace({
                 New
               </button>
             </div>
+            {activeSession && (
+              <div className="session-actions">
+                {renamingSession ? (
+                  <form className="rename-form" onSubmit={saveRename}>
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      maxLength={255}
+                      aria-label="Session title"
+                      disabled={sessionAction}
+                    />
+                    <button
+                      className="ghost small"
+                      type="submit"
+                      disabled={sessionAction || !renameValue.trim()}
+                    >
+                      Save
+                    </button>
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => setRenamingSession(false)}
+                      disabled={sessionAction}
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <button
+                      className="ghost small"
+                      onClick={startRename}
+                      disabled={streaming || sessionAction}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="ghost small"
+                      onClick={() => void handleExportSession()}
+                      disabled={sessionAction}
+                    >
+                      Export
+                    </button>
+                    <button
+                      className="ghost small danger"
+                      onClick={() => void handleDeleteSession()}
+                      disabled={streaming || sessionAction}
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             <ul className="session-list">
               {sessions.length === 0 && (
                 <li className="empty-list">No conversations yet.</li>
@@ -593,6 +821,7 @@ function Workspace({
                   key={message.id}
                   message={message}
                   onCitation={setActiveCitation}
+                  onFeedback={handleFeedback}
                 />
               ))
             )}
@@ -683,9 +912,11 @@ function EmptyState({ onPick }: { onPick: (question: string) => void }) {
 function MessageBubble({
   message,
   onCitation,
+  onFeedback,
 }: {
   message: LocalMessage;
   onCitation: (citation: Citation) => void;
+  onFeedback: FeedbackHandler;
 }) {
   const isUser = message.role === "user";
 
@@ -738,8 +969,110 @@ function MessageBubble({
             {message.tokens_used ?? 0} tokens · {message.latency_ms} ms
           </div>
         )}
+
+        {!isUser && !message.streaming && !message.error && (
+          <FeedbackBar message={message} onFeedback={onFeedback} />
+        )}
       </div>
     </article>
+  );
+}
+
+function FeedbackBar({
+  message,
+  onFeedback,
+}: {
+  message: LocalMessage;
+  onFeedback: FeedbackHandler;
+}) {
+  const existing = message.feedback;
+  const [comment, setComment] = useState(existing?.comment ?? "");
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(rating: -1 | 1, nextComment: string | null) {
+    setBusy(true);
+    try {
+      await onFeedback(message.id, rating, nextComment);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!existing) {
+      return;
+    }
+    await submit(existing.rating, comment.trim() || null);
+    setEditing(false);
+  }
+
+  const pendingComment = editing
+    ? comment.trim() || null
+    : (existing?.comment ?? null);
+
+  return (
+    <div className="feedback">
+      <div className="feedback-bar">
+        <span className="feedback-label">Was this helpful?</span>
+        <button
+          className={`feedback-btn ${existing?.rating === 1 ? "active" : ""}`}
+          onClick={() => void submit(1, pendingComment)}
+          disabled={busy}
+        >
+          Helpful
+        </button>
+        <button
+          className={`feedback-btn ${existing?.rating === -1 ? "active" : ""}`}
+          onClick={() => void submit(-1, pendingComment)}
+          disabled={busy}
+        >
+          Not helpful
+        </button>
+        {existing && !editing && (
+          <button
+            className="link feedback-comment-toggle"
+            type="button"
+            onClick={() => {
+              setComment(existing.comment ?? "");
+              setEditing(true);
+            }}
+          >
+            {existing.comment ? "Edit comment" : "Add comment"}
+          </button>
+        )}
+      </div>
+
+      {existing?.comment && !editing && (
+        <p className="feedback-saved">“{existing.comment}”</p>
+      )}
+
+      {editing && (
+        <form className="feedback-form" onSubmit={saveComment}>
+          <input
+            autoFocus
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            maxLength={2000}
+            placeholder="What worked or what was missing?"
+            aria-label="Feedback comment"
+            disabled={busy}
+          />
+          <button className="ghost small" type="submit" disabled={busy}>
+            Save
+          </button>
+          <button
+            className="ghost small"
+            type="button"
+            onClick={() => setEditing(false)}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+        </form>
+      )}
+    </div>
   );
 }
 
@@ -798,6 +1131,19 @@ function formatDate(value: string): string {
     month: "short",
     day: "numeric",
   });
+}
+
+function downloadText(filename: string, text: string): void {
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function errorText(error: unknown): string {

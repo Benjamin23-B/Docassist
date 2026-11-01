@@ -9,9 +9,10 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, DbSession
 from app.core.config import get_settings
@@ -31,8 +32,10 @@ from app.schemas.chat import (
     ChatSessionDetail,
     ChatSessionListResponse,
     ChatSessionRead,
+    ChatSessionUpdate,
     Citation,
 )
+from app.services.export import export_filename, render_session_markdown
 from app.workers.chunker import count_tokens
 from app.workers.embedder import EmbeddingProviderError, EmbeddingRequestError
 
@@ -67,6 +70,40 @@ def create_session(
     db.commit()
     db.refresh(session)
     return session
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=ChatSessionRead,
+    summary="Rename a chat session",
+)
+def rename_session(
+    session_id: uuid.UUID,
+    payload: ChatSessionUpdate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> ChatSession:
+    session = _get_owned_session(session_id, db, current_user.id)
+    session.title = payload.title
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a chat session with its messages and feedback",
+)
+def delete_session(
+    session_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Response:
+    session = _get_owned_session(session_id, db, current_user.id)
+    db.delete(session)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
@@ -111,6 +148,7 @@ def get_session(
     session = _get_owned_session(session_id, db, current_user.id)
     messages = db.scalars(
         select(Message)
+        .options(selectinload(Message.feedback))
         .where(Message.session_id == session.id)
         .order_by(Message.created_at, Message.id)
     ).all()
@@ -121,6 +159,43 @@ def get_session(
         doc_scope=session.doc_scope,
         created_at=session.created_at,
         messages=[ChatMessageRead.model_validate(message) for message in messages],
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/export",
+    summary="Download a chat session as Markdown",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"text/markdown": {}},
+            "description": "Markdown transcript with citations and feedback.",
+        }
+    },
+)
+def export_session(
+    session_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Response:
+    session = _get_owned_session(session_id, db, current_user.id)
+    messages = db.scalars(
+        select(Message)
+        .options(selectinload(Message.feedback))
+        .where(Message.session_id == session.id)
+        .order_by(Message.created_at, Message.id)
+    ).all()
+    markdown = render_session_markdown(
+        session_id=session.id,
+        title=session.title,
+        created_at=session.created_at,
+        messages=messages,
+    )
+    filename = export_filename(session.title, session_id=session.id)
+    return Response(
+        content=markdown,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

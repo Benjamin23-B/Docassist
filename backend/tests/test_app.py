@@ -17,10 +17,12 @@ EXPECTED_PATHS = {
     "/api/v1/chat/sessions",
     "/api/v1/chat/sessions/{session_id}",
     "/api/v1/chat/sessions/{session_id}/ask",
+    "/api/v1/chat/sessions/{session_id}/export",
+    "/api/v1/messages/{message_id}/feedback",
 }
 
 
-def test_openapi_includes_phase_one_routes() -> None:
+def test_openapi_includes_expected_routes() -> None:
     spec = app.openapi()
     assert EXPECTED_PATHS <= set(spec["paths"])
 

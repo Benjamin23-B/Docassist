@@ -41,6 +41,14 @@ export interface Citation {
   snippet: string;
 }
 
+export interface Feedback {
+  id: string;
+  message_id: string;
+  rating: -1 | 1;
+  comment: string | null;
+  created_at: string;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -49,6 +57,7 @@ export interface Message {
   citations: Citation[];
   tokens_used: number | null;
   latency_ms: number | null;
+  feedback: Feedback | null;
   created_at: string;
 }
 

@@ -34,8 +34,8 @@ app = FastAPI(
     title=settings.project_name,
     version=__version__,
     description=(
-        "Asynchronous document ingestion and grounded RAG Q&A. "
-        "Phase 1 exposes authentication, object storage and document management."
+        "Asynchronous document ingestion and grounded RAG Q&A with scoped "
+        "conversations, citations, and answer feedback."
     ),
     lifespan=lifespan,
     openapi_url=f"{settings.api_v1_prefix}/openapi.json",

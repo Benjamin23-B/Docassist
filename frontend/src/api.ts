@@ -4,6 +4,7 @@ import type {
   DocumentDetail,
   DocumentList,
   DoneEvent,
+  Feedback,
   MetaEvent,
   SessionList,
   User,
@@ -116,6 +117,12 @@ export const api = {
     body.append("file", file);
     return request<DocumentDetail>("/documents", { method: "POST", body });
   },
+  reindexDocument: (documentId: string) =>
+    request<DocumentDetail>(`/documents/${documentId}/reindex`, {
+      method: "POST",
+    }),
+  deleteDocument: (documentId: string) =>
+    request<void>(`/documents/${documentId}`, { method: "DELETE" }),
   sessions: () =>
     request<SessionList>("/chat/sessions?page=1&page_size=50"),
   createSession: (documentIds: string[]) =>
@@ -125,7 +132,47 @@ export const api = {
     }),
   session: (sessionId: string) =>
     request<ChatSessionDetail>(`/chat/sessions/${sessionId}`),
+  renameSession: (sessionId: string, title: string) =>
+    request<ChatSession>(`/chat/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+  deleteSession: (sessionId: string) =>
+    request<void>(`/chat/sessions/${sessionId}`, { method: "DELETE" }),
+  feedback: (messageId: string, rating: -1 | 1, comment: string | null) =>
+    request<Feedback>(`/messages/${messageId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ rating, comment }),
+    }),
 };
+
+export async function exportSession(
+  sessionId: string,
+): Promise<{ filename: string; markdown: string }> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(
+    `${API_BASE}/chat/sessions/${sessionId}/export`,
+    { headers },
+  );
+  if (!response.ok) {
+    if (response.status === 401) {
+      setToken(null);
+    }
+    throw new ApiError(response.status, await errorMessage(response));
+  }
+
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  return {
+    filename: match?.[1] ?? "chat-session.md",
+    markdown: await response.text(),
+  };
+}
 
 export interface AskHandlers {
   onMeta?: (event: MetaEvent) => void;
