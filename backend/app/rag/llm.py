@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_TITLE_QUERY_RE = re.compile(
+    r"\b(?:name|title)\s+(?:of\s+)?(?:the\s+|this\s+)?(?:doc(?:ument)?|file)\b"
+    r"|\b(?:doc(?:ument)?|file)\s+(?:name|title)\b"
+    r"|\bwhich\s+doc(?:ument)?\b"
+    r"|\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:name|title)\b",
+    re.IGNORECASE,
+)
+_SUMMARY_QUERY_RE = re.compile(
+    r"\b(?:overview|summar(?:y|ise|ize)|contents?|describe|"
+    r"what(?:'s|\s+is)\s+(?:in|this)|tell\s+me\s+about)\b",
+    re.IGNORECASE,
+)
 
 _STOPWORDS = {
     "about",
@@ -162,7 +174,16 @@ class DeterministicLLMProvider:
         if not passages:
             return "I couldn't find that in the provided documents."
 
+        if _TITLE_QUERY_RE.search(question):
+            names = _document_names(passages)
+            if names:
+                if len(names) == 1:
+                    return f"The linked document is {names[0]}."
+                return f"The linked documents are {', '.join(names)}."
+
         chosen = self._select_sentences(question, passages)
+        if not chosen and _SUMMARY_QUERY_RE.search(question):
+            chosen = self._summary_sentences(passages)
         if not chosen:
             return "I couldn't find that in the provided documents."
 
@@ -206,6 +227,32 @@ class DeterministicLLMProvider:
             chosen.append((index, _truncate(sentence)))
             if len(chosen) >= 4:
                 break
+        return chosen
+
+    def _summary_sentences(
+        self,
+        passages: Sequence[SourcePassage],
+    ) -> list[tuple[int, str]]:
+        """Use opening passages for generic overview questions.
+
+        Generic prompts such as "overview" or "what are the contents" have no
+        useful keyword overlap, so the normal extractive matcher would return
+        nothing even when retrieval succeeded.
+        """
+        chosen: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for passage in passages:
+            for raw_sentence in _SENTENCE_RE.split(passage.text):
+                sentence = " ".join(raw_sentence.split())
+                if not self._usable_sentence(sentence):
+                    continue
+                key = sentence.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                chosen.append((passage.index, _truncate(sentence)))
+                if len(chosen) >= 4:
+                    return chosen
         return chosen
 
     @staticmethod
@@ -268,6 +315,16 @@ class OpenAILLMProvider:
                     yield text
         except Exception as exc:
             raise LLMProviderError(f"LLM request failed: {exc}") from exc
+
+
+def _document_names(passages: Sequence[SourcePassage]) -> list[str]:
+    names: list[str] = []
+    for passage in passages:
+        # Source passages are rendered as "<filename> (page/section details)".
+        name = passage.source.split(" (", 1)[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _truncate(text: str, limit: int = 320) -> str:

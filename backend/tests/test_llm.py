@@ -90,9 +90,37 @@ def test_deterministic_answer_is_extractive_and_cited() -> None:
     assert "Based on the selected documents" in answer
 
 
+def test_deterministic_answer_names_the_document() -> None:
+    answer = DeterministicLLMProvider().compose_answer(
+        question="name the doc",
+        passages=[_passage()],
+    )
+
+    assert answer == "The linked document is handbook.md."
+
+
+def test_deterministic_answer_summarises_without_keyword_overlap() -> None:
+    answer = DeterministicLLMProvider().compose_answer(
+        question="overview",
+        passages=[_passage()],
+    )
+
+    assert "twenty-five days" in answer
+    assert "[1]" in answer
+
+
 def test_deterministic_answer_without_context() -> None:
     provider = DeterministicLLMProvider()
     answer = provider.compose_answer(question="Anything?", passages=[])
+
+    assert answer == "I couldn't find that in the provided documents."
+
+
+def test_deterministic_answer_keeps_unknown_questions_grounded() -> None:
+    answer = DeterministicLLMProvider().compose_answer(
+        question="What is the share price?",
+        passages=[_passage()],
+    )
 
     assert answer == "I couldn't find that in the provided documents."
 
