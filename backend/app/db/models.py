@@ -218,6 +218,12 @@ class Message(TimestampMixin, Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
+    document_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)),
+        nullable=False,
+        default=list,
+        server_default=text("'{}'::uuid[]"),
+    )
     tool_calls: Mapped[list[dict]] = mapped_column(
         JSONB,
         nullable=False,

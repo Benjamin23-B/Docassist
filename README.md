@@ -70,9 +70,11 @@ This platform provides asynchronous document ingestion, grounded hybrid retrieva
 - **Real-time Streaming**: Server-Sent Events (SSE) for low-latency streaming responses.
 - **Agentic Tool Loop** *(Phase 6)*: Scoped tool planning and execution (`search_documents`, `summarize_document`, `compare_documents`, `get_page`) with a persisted trace shown in the UI.
 - **Production Safeguards** *(Phase 6)*: Per-user/IP rate limits with Redis and a process-local fallback, plus a CI-friendly golden-set evaluation runner.
+- **Document Sections** *(Phase 7)*: Link multiple documents to one chat, switch the active document section per question, and see which section every message belongs to.
 
 ### 3. Session & Document Management
 - Dynamic document scoping: query across all documents or target a selected subset.
+- Document sections let one chat discuss several uploaded files without mixing them; each answer is recorded against the section that produced it.
 - Session-based conversation logs with rename, Markdown export, deletion, and per-answer helpfulness feedback.
 
 ---
@@ -113,6 +115,7 @@ question ──► embed ──► pgvector top-k ──► grounded prompt ─�
 - **Document management**: tenant-scoped listing and status polling, short-lived presigned downloads, reindexing, and cascade deletion of chunks plus the stored object.
 - **Conversation history**: sessions are listed newest-first, reopened with their full message history, renamed, and deleted (messages and feedback cascade).
 - **Scoped retrieval**: a session can be created against a validated subset of the user's documents; reopening it restores that scope.
+- **Document sections**: linked documents are returned with each session, and the composer can target one section per question via `ask` request `document_ids`. Messages persist the section scope so the transcript still shows which document was being discussed after reload.
 - **Answer feedback**: `POST /api/v1/messages/{id}/feedback` records one verdict per assistant message (`rating` = `1` helpful / `-1` not helpful) with an optional 2,000-character comment. Resubmitting replaces the existing verdict.
 - **Markdown export**: `GET /api/v1/chat/sessions/{id}/export` downloads a transcript with citations and feedback as a `.md` attachment.
 
@@ -229,6 +232,7 @@ python -m evals.run_eval --dataset evals/golden.example.json \
 | `role` | `VARCHAR(16)` | `user` \| `assistant` \| `system` |
 | `content` | `TEXT` | Raw text response |
 | `citations` | `JSONB` | Source chips `[{doc_id, page, snippet}]` |
+| `document_ids` | `UUID[]` | Document section this turn was scoped to (empty = all linked) |
 | `tool_calls` | `JSONB` | Agent trace `[{name, arguments, status, matches, detail}]` |
 | `tokens_used` | `INTEGER` | Token consumption |
 | `latency_ms` | `INTEGER` | Response time in milliseconds |
@@ -264,6 +268,7 @@ python -m evals.run_eval --dataset evals/golden.example.json \
 - `GET /api/v1/chat/sessions` - List active sessions
 - `GET /api/v1/chat/sessions/{id}` - Get session message history (including existing feedback)
 - `PATCH /api/v1/chat/sessions/{id}` - Rename a session
+- `PUT /api/v1/chat/sessions/{id}/documents` - Replace the document sections linked to a session
 - `DELETE /api/v1/chat/sessions/{id}` - Delete a session, its messages, and feedback
 - `GET /api/v1/chat/sessions/{id}/export` - Download the transcript as Markdown
 - `POST /api/v1/chat/sessions/{id}/ask` - Submit query & stream response via SSE
@@ -273,7 +278,7 @@ SSE events emitted by the ask endpoint:
 
 | Event | Data |
 |---|---|
-| `meta` | `session_id`, `message_id`, `model`, `citations[]`, `query`, `retrieval`, `tools[]` |
+| `meta` | `session_id`, `message_id`, `model`, `citations[]`, `document_ids[]`, `query`, `retrieval`, `tools[]` |
 | `token` | `text` |
 | `done` | `message_id`, `latency_ms`, `tokens_used` |
 | `error` | `detail`, `message_id` |
@@ -372,6 +377,7 @@ rag/
 | **Phase 4** | ✅ Document & History Scope | Document management, scoped conversation sessions with rename/export/delete, and answer feedback |
 | **Phase 5** | ✅ Advanced Search | Query rewriting from history, hybrid vector + keyword retrieval with RRF, and candidate reranking |
 | **Phase 6** | ✅ Agent Loop & Production | Scoped tool execution with persisted traces, golden-set evaluation runner, Redis-backed rate limits |
+| **Phase 7** | ✅ Document Sections | Multi-document chat linking, per-question section targeting, and persisted document attribution on messages |
 
 ---
 

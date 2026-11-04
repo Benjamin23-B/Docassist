@@ -24,6 +24,18 @@ class ChatSessionUpdate(BaseModel):
         return cleaned
 
 
+class ChatSessionScopeUpdate(BaseModel):
+    document_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+
+
+class ChatSessionDocument(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    status: str
+
+
 class FeedbackRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -61,6 +73,7 @@ class ChatSessionRead(BaseModel):
     id: uuid.UUID
     title: str
     doc_scope: list[uuid.UUID]
+    documents: list[ChatSessionDocument] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -84,6 +97,7 @@ class ChatMessageRead(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
     citations: list[Citation] = Field(default_factory=list)
+    document_ids: list[uuid.UUID] = Field(default_factory=list)
     tokens_used: int | None = None
     latency_ms: int | None = None
     feedback: FeedbackRead | None = None
@@ -104,3 +118,4 @@ class ChatSessionListResponse(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
+    document_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)

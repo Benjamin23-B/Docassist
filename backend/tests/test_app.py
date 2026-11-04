@@ -16,6 +16,7 @@ EXPECTED_PATHS = {
     "/api/v1/documents/{document_id}/download",
     "/api/v1/chat/sessions",
     "/api/v1/chat/sessions/{session_id}",
+    "/api/v1/chat/sessions/{session_id}/documents",
     "/api/v1/chat/sessions/{session_id}/ask",
     "/api/v1/chat/sessions/{session_id}/export",
     "/api/v1/messages/{message_id}/feedback",

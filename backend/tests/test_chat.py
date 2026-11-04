@@ -9,6 +9,8 @@ from app.schemas.chat import (
     AskRequest,
     ChatMessageRead,
     ChatSessionCreate,
+    ChatSessionRead,
+    ChatSessionScopeUpdate,
     ChatSessionUpdate,
     FeedbackCreate,
 )
@@ -28,6 +30,45 @@ def test_chat_session_create_accepts_document_scope() -> None:
 
     assert payload.title == "Benefits"
     assert payload.document_ids == [document_id]
+
+
+def test_chat_session_scope_update_accepts_document_sections() -> None:
+    document_ids = [uuid.uuid4(), uuid.uuid4()]
+
+    payload = ChatSessionScopeUpdate(document_ids=document_ids)
+
+    assert payload.document_ids == document_ids
+
+
+def test_session_read_lists_linked_document_sections() -> None:
+    document_id = uuid.uuid4()
+    session = ChatSessionRead.model_validate(
+        {
+            "id": uuid.uuid4(),
+            "title": "Compare policies",
+            "doc_scope": [document_id],
+            "documents": [
+                {
+                    "id": document_id,
+                    "filename": "handbook.md",
+                    "status": "ready",
+                }
+            ],
+            "created_at": datetime.now(UTC),
+        }
+    )
+
+    assert session.documents[0].filename == "handbook.md"
+    assert session.documents[0].status == "ready"
+
+
+def test_ask_request_accepts_an_optional_document_section() -> None:
+    document_id = uuid.uuid4()
+
+    payload = AskRequest(question="What is the leave policy?", document_ids=[document_id])
+
+    assert payload.document_ids == [document_id]
+    assert AskRequest(question="Compare all documents").document_ids is None
 
 
 def test_ask_request_rejects_empty_and_overlong_questions() -> None:

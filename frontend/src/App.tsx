@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 
 import {
@@ -12,6 +12,7 @@ import {
 } from "./api";
 import type {
   ChatSession,
+  ChatSessionDocument,
   Citation,
   DocumentItem,
   Message,
@@ -233,6 +234,10 @@ function Workspace({
   const [sessionAction, setSessionAction] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
+  const [editingSections, setEditingSections] = useState(false);
+  const [sectionSelection, setSectionSelection] = useState<string[]>([]);
+  const [savingSections, setSavingSections] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -336,7 +341,10 @@ function Workspace({
     try {
       await api.deleteDocument(document.id);
       setScope((previous) => previous.filter((id) => id !== document.id));
-      await refreshDocuments();
+      setActiveSectionId((previous) =>
+        previous === document.id ? null : previous,
+      );
+      await Promise.all([refreshDocuments(), refreshSessions()]);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -448,6 +456,10 @@ function Workspace({
       setActiveSessionId(session.id);
       setMessages([]);
       setRenamingSession(false);
+      setEditingSections(false);
+      setActiveSectionId(
+        session.doc_scope.length === 1 ? session.doc_scope[0] : null,
+      );
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -467,10 +479,63 @@ function Workspace({
       setMessages(detail.messages);
       setScope(detail.doc_scope);
       setRenamingSession(false);
+      setEditingSections(false);
+      setActiveSectionId(
+        detail.doc_scope.length === 1 ? detail.doc_scope[0] : null,
+      );
     } catch (err) {
       setError(errorText(err));
     } finally {
       setLoadingSession(false);
+    }
+  }
+
+  function startEditSections() {
+    if (!activeSession) {
+      return;
+    }
+    const availableIds = new Set(documents.map((document) => document.id));
+    setSectionSelection(
+      activeSession.doc_scope.filter((documentId) =>
+        availableIds.has(documentId),
+      ),
+    );
+    setEditingSections(true);
+  }
+
+  function toggleSectionSelection(documentId: string) {
+    setSectionSelection((previous) =>
+      previous.includes(documentId)
+        ? previous.filter((id) => id !== documentId)
+        : [...previous, documentId],
+    );
+  }
+
+  async function saveSections() {
+    if (!activeSession) {
+      return;
+    }
+    setSavingSections(true);
+    setError(null);
+    try {
+      const updated = await api.updateSessionDocuments(
+        activeSession.id,
+        sectionSelection,
+      );
+      setSessions((previous) =>
+        previous.map((session) =>
+          session.id === updated.id ? updated : session,
+        ),
+      );
+      setScope(updated.doc_scope);
+      setActiveSectionId(
+        updated.doc_scope.length === 1 ? updated.doc_scope[0] : null,
+      );
+      setEditingSections(false);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSavingSections(false);
     }
   }
 
@@ -479,6 +544,15 @@ function Workspace({
     if (!text || streaming) {
       return;
     }
+
+    const linkedScope = activeSessionId
+      ? (sessions.find((session) => session.id === activeSessionId)?.doc_scope ??
+        scope)
+      : scope;
+    const turnDocumentIds = activeSectionId ? [activeSectionId] : undefined;
+    const messageDocumentIds = activeSectionId
+      ? [activeSectionId]
+      : linkedScope;
 
     setError(null);
     setQuestion("");
@@ -503,6 +577,7 @@ function Workspace({
         role: "user",
         content: text,
         citations: [],
+        document_ids: messageDocumentIds,
         tool_calls: [],
         tokens_used: null,
         latency_ms: null,
@@ -522,6 +597,7 @@ function Workspace({
           role: "assistant",
           content: "",
           citations: [],
+          document_ids: messageDocumentIds,
           tool_calls: [],
           tokens_used: null,
           latency_ms: null,
@@ -532,7 +608,7 @@ function Workspace({
       ]);
 
       let answer = "";
-      await askQuestion(sessionId, text, {
+      await askQuestion(sessionId, text, turnDocumentIds, {
         onMeta: (meta) => {
           assistantKey = meta.message_id;
           setMessages((previous) =>
@@ -543,6 +619,7 @@ function Workspace({
                     id: meta.message_id,
                     session_id: meta.session_id,
                     citations: meta.citations,
+                    document_ids: meta.document_ids ?? message.document_ids,
                     tool_calls: meta.tools ?? [],
                     model: meta.model,
                     retrieval: meta.retrieval,
@@ -623,9 +700,30 @@ function Workspace({
 
   const activeSession =
     sessions.find((session) => session.id === activeSessionId) ?? null;
-  const scopeLabel = scope.length
-    ? `${scope.length} document${scope.length === 1 ? "" : "s"} in scope`
-    : "All ready documents";
+  const activeDocuments: ChatSessionDocument[] = activeSession
+    ? activeSession.documents.length > 0
+      ? activeSession.documents
+      : documents
+          .filter((document) => activeSession.doc_scope.includes(document.id))
+          .map((document) => ({
+            id: document.id,
+            filename: document.filename,
+            status: document.status,
+          }))
+    : documents
+        .filter((document) => scope.includes(document.id))
+        .map((document) => ({
+          id: document.id,
+          filename: document.filename,
+          status: document.status,
+        }));
+  const activeSection =
+    activeDocuments.find((document) => document.id === activeSectionId) ?? null;
+  const scopeLabel = activeSection
+    ? `Section: ${activeSection.filename}`
+    : scope.length
+      ? `${scope.length} document${scope.length === 1 ? "" : "s"} in scope`
+      : "All ready documents";
 
   return (
     <div className="app-shell">
@@ -818,6 +916,123 @@ function Workspace({
         </aside>
 
         <main className="main">
+          <section className="doc-sections" aria-label="Document sections">
+            <div className="doc-sections-head">
+              <div className="doc-sections-copy">
+                <span className="doc-sections-title">Document sections</span>
+                <span className="doc-sections-note">
+                  {activeSession
+                    ? "Pick a section to keep the answer grounded in one document."
+                    : "These documents will be linked when the chat starts."}
+                </span>
+              </div>
+              {activeSession && (
+                <button
+                  className="ghost small"
+                  onClick={() => {
+                    if (editingSections) {
+                      setEditingSections(false);
+                    } else {
+                      startEditSections();
+                    }
+                  }}
+                  disabled={streaming || savingSections}
+                >
+                  {editingSections ? "Cancel" : "Link documents"}
+                </button>
+              )}
+            </div>
+
+            {editingSections && activeSession ? (
+              <div className="section-editor">
+                <div className="section-options">
+                  {documents.length === 0 && (
+                    <span className="hint">Upload a document first.</span>
+                  )}
+                  {documents.map((document) => (
+                    <label
+                      key={document.id}
+                      className={`section-option ${
+                        sectionSelection.includes(document.id) ? "selected" : ""
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={sectionSelection.includes(document.id)}
+                        disabled={
+                          document.status !== "ready" || savingSections
+                        }
+                        onChange={() => toggleSectionSelection(document.id)}
+                      />
+                      <span className={`status-dot ${document.status}`} />
+                      <span
+                        className="section-option-name"
+                        title={document.filename}
+                      >
+                        {document.filename}
+                      </span>
+                      <span className="section-option-status">
+                        {document.status}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="section-editor-actions">
+                  <span className="hint">
+                    Select two or more ready documents to compare them in this
+                    chat.
+                  </span>
+                  <button
+                    className="primary compact"
+                    onClick={() => void saveSections()}
+                    disabled={savingSections}
+                  >
+                    {savingSections ? "Saving…" : "Save sections"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="section-strip">
+                {activeDocuments.length === 0 ? (
+                  <span className="section-all active">
+                    All ready documents
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      className={`section-chip ${
+                        activeSectionId ? "" : "active"
+                      }`}
+                      onClick={() => setActiveSectionId(null)}
+                      disabled={streaming}
+                    >
+                      <span>All linked</span>
+                      <span className="section-count">
+                        {activeDocuments.length}
+                      </span>
+                    </button>
+                    {activeDocuments.map((document) => (
+                      <button
+                        key={document.id}
+                        className={`section-chip ${
+                          activeSectionId === document.id ? "active" : ""
+                        }`}
+                        onClick={() => setActiveSectionId(document.id)}
+                        disabled={streaming || document.status !== "ready"}
+                        title={`Ask only about ${document.filename}`}
+                      >
+                        <span className={`status-dot ${document.status}`} />
+                        <span className="section-chip-name">
+                          {document.filename}
+                        </span>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </section>
+
           <div className="messages" ref={scrollRef}>
             {loadingSession ? (
               <div className="boot inline">
@@ -827,14 +1042,27 @@ function Workspace({
             ) : messages.length === 0 ? (
               <EmptyState onPick={setQuestion} />
             ) : (
-              messages.map((message) => (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  onCitation={setActiveCitation}
-                  onFeedback={handleFeedback}
-                />
-              ))
+              messages.map((message, index) => {
+                const sectionLabel = sectionLabelFor(message, activeDocuments);
+                const previousLabel =
+                  index > 0
+                    ? sectionLabelFor(messages[index - 1], activeDocuments)
+                    : null;
+                return (
+                  <Fragment key={message.id}>
+                    {sectionLabel && sectionLabel !== previousLabel && (
+                      <div className="message-section">
+                        <span>{sectionLabel}</span>
+                      </div>
+                    )}
+                    <MessageBubble
+                      message={message}
+                      onCitation={setActiveCitation}
+                      onFeedback={handleFeedback}
+                    />
+                  </Fragment>
+                );
+              })
             )}
           </div>
 
@@ -918,6 +1146,22 @@ function EmptyState({ onPick }: { onPick: (question: string) => void }) {
       </div>
     </div>
   );
+}
+
+function sectionLabelFor(
+  message: LocalMessage,
+  documents: ChatSessionDocument[],
+): string | null {
+  if (message.document_ids.length === 0) {
+    return null;
+  }
+  return message.document_ids
+    .map(
+      (documentId) =>
+        documents.find((document) => document.id === documentId)?.filename ??
+        "Removed document",
+    )
+    .join(" + ");
 }
 
 function toolLabel(tool: ToolCall): string {

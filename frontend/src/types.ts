@@ -65,6 +65,7 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   citations: Citation[];
+  document_ids: string[];
   tool_calls: ToolCall[];
   tokens_used: number | null;
   latency_ms: number | null;
@@ -72,10 +73,17 @@ export interface Message {
   created_at: string;
 }
 
+export interface ChatSessionDocument {
+  id: string;
+  filename: string;
+  status: DocumentStatus;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
   doc_scope: string[];
+  documents: ChatSessionDocument[];
   created_at: string;
 }
 
@@ -103,6 +111,7 @@ export interface MetaEvent {
   message_id: string;
   model: string;
   citations: Citation[];
+  document_ids?: string[];
   query?: string;
   retrieval?: RetrievalInfo;
   tools?: ToolCall[];

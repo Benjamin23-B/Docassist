@@ -137,6 +137,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
+  updateSessionDocuments: (sessionId: string, documentIds: string[]) =>
+    request<ChatSession>(`/chat/sessions/${sessionId}/documents`, {
+      method: "PUT",
+      body: JSON.stringify({ document_ids: documentIds }),
+    }),
   deleteSession: (sessionId: string) =>
     request<void>(`/chat/sessions/${sessionId}`, { method: "DELETE" }),
   feedback: (messageId: string, rating: -1 | 1, comment: string | null) =>
@@ -184,6 +189,7 @@ export interface AskHandlers {
 export async function askQuestion(
   sessionId: string,
   question: string,
+  documentIds: string[] | undefined,
   handlers: AskHandlers,
 ): Promise<void> {
   const headers = new Headers({ "Content-Type": "application/json" });
@@ -197,7 +203,10 @@ export async function askQuestion(
     {
       method: "POST",
       headers,
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({
+        question,
+        ...(documentIds?.length ? { document_ids: documentIds } : {}),
+      }),
     },
   );
 

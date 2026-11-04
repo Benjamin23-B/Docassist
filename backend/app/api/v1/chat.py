@@ -6,7 +6,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
@@ -34,8 +34,10 @@ from app.schemas.chat import (
     ChatMessageRead,
     ChatSessionCreate,
     ChatSessionDetail,
+    ChatSessionDocument,
     ChatSessionListResponse,
     ChatSessionRead,
+    ChatSessionScopeUpdate,
     ChatSessionUpdate,
     Citation,
 )
@@ -61,7 +63,7 @@ def create_session(
     payload: ChatSessionCreate,
     db: DbSession,
     current_user: CurrentUser,
-) -> ChatSession:
+) -> ChatSessionRead:
     document_ids = _validate_document_scope(
         db, user_id=current_user.id, document_ids=payload.document_ids
     )
@@ -73,7 +75,7 @@ def create_session(
     db.add(session)
     db.commit()
     db.refresh(session)
-    return session
+    return _session_read(db, session, user_id=current_user.id)
 
 
 @router.patch(
@@ -86,12 +88,33 @@ def rename_session(
     payload: ChatSessionUpdate,
     db: DbSession,
     current_user: CurrentUser,
-) -> ChatSession:
+) -> ChatSessionRead:
     session = _get_owned_session(session_id, db, current_user.id)
     session.title = payload.title
     db.commit()
     db.refresh(session)
-    return session
+    return _session_read(db, session, user_id=current_user.id)
+
+
+@router.put(
+    "/sessions/{session_id}/documents",
+    response_model=ChatSessionRead,
+    summary="Link documents to a chat session as document sections",
+    responses={400: {"description": "Unknown document ids"}},
+)
+def update_session_documents(
+    session_id: uuid.UUID,
+    payload: ChatSessionScopeUpdate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> ChatSessionRead:
+    session = _get_owned_session(session_id, db, current_user.id)
+    session.doc_scope = _validate_document_scope(
+        db, user_id=current_user.id, document_ids=payload.document_ids
+    )
+    db.commit()
+    db.refresh(session)
+    return _session_read(db, session, user_id=current_user.id)
 
 
 @router.delete(
@@ -132,7 +155,7 @@ def list_sessions(
     ).all()
 
     return ChatSessionListResponse(
-        items=[ChatSessionRead.model_validate(session) for session in sessions],
+        items=_session_reads(db, sessions, user_id=current_user.id),
         total=total,
         page=page,
         page_size=page_size,
@@ -157,11 +180,9 @@ def get_session(
         .order_by(Message.created_at, Message.id)
     ).all()
 
+    session_read = _session_read(db, session, user_id=current_user.id)
     return ChatSessionDetail(
-        id=session.id,
-        title=session.title,
-        doc_scope=session.doc_scope,
-        created_at=session.created_at,
+        **session_read.model_dump(),
         messages=[ChatMessageRead.model_validate(message) for message in messages],
     )
 
@@ -229,6 +250,12 @@ def ask_question(
             status_code=422,
             detail="Question must not be empty",
         )
+    turn_scope = _resolve_turn_scope(
+        db,
+        user_id=current_user.id,
+        session=session,
+        requested=payload.document_ids,
+    )
 
     history = _load_history(db, session_id_value)
     search_query = rewrite_query(question, history)
@@ -250,7 +277,7 @@ def ask_question(
                 db,
                 user_id=current_user.id,
                 question=search_query,
-                document_ids=list(session.doc_scope),
+                document_ids=list(turn_scope),
                 candidate_k=candidate_k,
                 top_k=settings.retrieval_top_k,
             )
@@ -261,7 +288,7 @@ def ask_question(
                 db,
                 user_id=current_user.id,
                 query=search_query,
-                doc_scope=session.doc_scope,
+                doc_scope=turn_scope,
                 top_k=candidate_k,
             )
             chunks = rerank_chunks(
@@ -295,6 +322,7 @@ def ask_question(
             session_id=session_id_value,
             role=MessageRole.USER.value,
             content=question,
+            document_ids=list(turn_scope),
         )
     )
     if session.title == DEFAULT_SESSION_TITLE:
@@ -315,6 +343,7 @@ def ask_question(
                 "message_id": str(assistant_message_id),
                 "model": llm.model_name,
                 "citations": citation_payload,
+                "document_ids": [str(document_id) for document_id in turn_scope],
                 "query": search_query,
                 "retrieval": {
                     "rewritten": search_query != " ".join(question.split()),
@@ -344,6 +373,7 @@ def ask_question(
                     session_id=session_id_value,
                     content=partial,
                     citations=citations,
+                    document_ids=turn_scope,
                     latency_ms=_elapsed_ms(started),
                     tool_calls=tool_calls,
                 )
@@ -369,6 +399,7 @@ def ask_question(
             session_id=session_id_value,
             content=answer,
             citations=citations,
+            document_ids=turn_scope,
             latency_ms=latency_ms,
             tokens_used=tokens_used,
             tool_calls=tool_calls,
@@ -418,6 +449,94 @@ def _validate_document_scope(
             detail=f"Unknown document ids: {', '.join(unknown)}",
         )
     return unique_ids
+
+
+def _resolve_turn_scope(
+    db: DbSession,
+    *,
+    user_id: uuid.UUID,
+    session: ChatSession,
+    requested: list[uuid.UUID] | None,
+) -> list[uuid.UUID]:
+    """Choose the documents for one answer, keeping it inside the session."""
+    if requested is None:
+        return list(session.doc_scope)
+
+    requested_scope = _validate_document_scope(
+        db,
+        user_id=user_id,
+        document_ids=requested,
+    )
+    if not requested_scope:
+        return list(session.doc_scope)
+    if session.doc_scope:
+        outside = [
+            str(document_id)
+            for document_id in requested_scope
+            if document_id not in session.doc_scope
+        ]
+        if outside:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(f"These documents are not linked to the session: {', '.join(outside)}"),
+            )
+    return requested_scope
+
+
+def _session_reads(
+    db: DbSession,
+    sessions: Sequence[ChatSession],
+    *,
+    user_id: uuid.UUID,
+) -> list[ChatSessionRead]:
+    documents_by_id = _session_documents_by_id(db, sessions, user_id=user_id)
+    return [_session_read_from(session, documents_by_id) for session in sessions]
+
+
+def _session_read(
+    db: DbSession,
+    session: ChatSession,
+    *,
+    user_id: uuid.UUID,
+) -> ChatSessionRead:
+    return _session_reads(db, [session], user_id=user_id)[0]
+
+
+def _session_documents_by_id(
+    db: DbSession,
+    sessions: Sequence[ChatSession],
+    *,
+    user_id: uuid.UUID,
+) -> dict[uuid.UUID, Document]:
+    document_ids = {document_id for session in sessions for document_id in session.doc_scope}
+    if not document_ids:
+        return {}
+
+    documents = db.scalars(
+        select(Document).where(
+            Document.user_id == user_id,
+            Document.id.in_(document_ids),
+        )
+    ).all()
+    return {document.id: document for document in documents}
+
+
+def _session_read_from(
+    session: ChatSession,
+    documents_by_id: dict[uuid.UUID, Document],
+) -> ChatSessionRead:
+    documents = [
+        ChatSessionDocument.model_validate(documents_by_id[document_id])
+        for document_id in session.doc_scope
+        if document_id in documents_by_id
+    ]
+    return ChatSessionRead(
+        id=session.id,
+        title=session.title,
+        doc_scope=session.doc_scope,
+        documents=documents,
+        created_at=session.created_at,
+    )
 
 
 def _get_owned_session(session_id: uuid.UUID, db: DbSession, user_id: uuid.UUID) -> ChatSession:
@@ -491,6 +610,7 @@ def _persist_assistant_message(
     session_id: uuid.UUID,
     content: str,
     citations: list[Citation],
+    document_ids: list[uuid.UUID],
     latency_ms: int,
     tokens_used: int | None = None,
     tool_calls: list[ToolCall] | None = None,
@@ -507,6 +627,7 @@ def _persist_assistant_message(
                     role=MessageRole.ASSISTANT.value,
                     content=content,
                     citations=[citation.model_dump(mode="json") for citation in citations],
+                    document_ids=list(document_ids),
                     tool_calls=[call.as_dict() for call in tool_calls or []],
                     tokens_used=(tokens_used if tokens_used is not None else count_tokens(content)),
                     latency_ms=latency_ms,

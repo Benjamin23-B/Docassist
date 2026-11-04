@@ -505,6 +505,199 @@ ul {
   box-shadow: 0 0 0 3px rgba(109, 140, 255, 0.12);
 }
 
+/* ---------- Document sections ---------- */
+
+.doc-sections {
+  border-bottom: 1px solid var(--border);
+  background: rgba(13, 19, 34, 0.55);
+  padding: 12px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-sections-head {
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.doc-sections-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.doc-sections-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.doc-sections-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.section-strip {
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.section-chip,
+.section-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 300px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(20, 28, 49, 0.72);
+  color: var(--muted);
+  padding: 6px 11px;
+  font-size: 11.5px;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.section-chip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(109, 140, 255, 0.5);
+}
+
+.section-chip.active,
+.section-all.active {
+  color: var(--accent-2);
+  border-color: rgba(53, 208, 186, 0.5);
+  background: rgba(53, 208, 186, 0.1);
+}
+
+.section-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section-count {
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  padding-left: 7px;
+  font-size: 10.5px;
+}
+
+.section-editor {
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.section-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 6px;
+  max-height: 184px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.section-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  padding: 7px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.section-option.selected {
+  border-color: rgba(109, 140, 255, 0.5);
+  background: rgba(109, 140, 255, 0.09);
+}
+
+.section-option input {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.section-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section-option-status {
+  flex: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.section-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.primary.compact {
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.message-section {
+  max-width: 920px;
+  margin: 0 auto 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent-2);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.message-section span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-section::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgba(53, 208, 186, 0.35),
+    transparent
+  );
+}
+
 /* ---------- Messages ---------- */
 
 .messages {
@@ -1136,6 +1329,19 @@ ul {
   .brand p,
   .user-email {
     display: none;
+  }
+
+  .doc-sections {
+    padding: 10px 14px;
+  }
+
+  .doc-sections-note {
+    display: none;
+  }
+
+  .section-editor-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .messages {
